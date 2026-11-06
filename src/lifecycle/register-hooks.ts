@@ -16,6 +16,7 @@ import {
   blockWorkItem,
   decideBeforeSettle,
   findAuthorization,
+  getLegalNextPhases,
   isPlanningPhase,
   pauseWorkItem,
   recordOperationFailure,
@@ -50,6 +51,45 @@ const isKickoffBanner = (text: string): boolean =>
   text.startsWith("Question ") ||
   text.startsWith("Stop user-authorized cancelled")
 
+
+const describePhaseContract = (state: WorkItemState, finalizedPath: string): string => {
+  if (state.kind === "goal") {
+    switch (state.phase) {
+      case "intake":
+      case "explore":
+      case "analyze":
+        return "Advance via realgoal_control(action: 'advance', targetPhase) -> 'process' -> 'verify'; manage TODOs via realgoal_todo."
+      case "process":
+        return "Start TODO via realgoal_todo(action: 'start'), implement, call realgoal_todo(action: 'submit_for_verification'), then advance to 'verify'."
+      case "verify":
+        return "Record fresh evidence via realgoal_todo(action: 'record_evidence', evidence: { criterionIds: ['C001'], ... }), call realgoal_todo(action: 'complete'), then realgoal_finish(recordGoalLevelVerification: true)."
+      default:
+        return "Finish via realgoal_finish once TODOs and criteria have passing evidence."
+    }
+  }
+  switch (state.phase) {
+    case "intake":
+    case "discovery":
+    case "design":
+    case "analysis":
+      return "Save findings/decisions via realgoal_control(action: 'checkpoint'), clarify ambiguities via realgoal_question (pair with realgoal_preview for visual mockups), then advance to 'finalization'."
+    case "finalization":
+      return `Write complete candidate to ${finalizedPath} (Objective/Goal, '## ' stage sections with in-scope/out-of-scope & acceptance/pass checks, no 'TBD'), then call realgoal_control(action: 'finalize').`
+    case "draft_review":
+      return "Dispatch reviewer via realgoal_delegate(role: 'draft_review', enterWait: true) or await user review/waiver."
+    case "publication_choice":
+    case "publication":
+    case "execution_choice":
+      return "Await user selection (/realgoal publish or /realgoal execute); do NOT edit repository files yet."
+    case "lookup":
+    case "implement":
+    case "verify_item":
+    case "verify_goal":
+      return "Populate/start TODOs via realgoal_todo, implement -> submit_for_verification -> record_evidence -> complete, then realgoal_finish(recordGoalLevelVerification: true)."
+    default:
+      return "Finish via realgoal_finish once required gates and evidence pass."
+  }
+}
 export const registerRealgoalHooks = (pi: ExtensionAPI, runtime: RealgoalRuntime): void => {
   // ---------------------------------------------------------------------------
   // 1. session_start (§12.2, D08, D09)
@@ -251,9 +291,11 @@ export const registerRealgoalHooks = (pi: ExtensionAPI, runtime: RealgoalRuntime
                       ? `\nREAD-ONLY FORK ATTACHMENT: Do not mutate work item ${state.id} unless user runs /realgoal resume.`
                       : ""
 
+                    const legalNext = getLegalNextPhases(state)
                     const contextLines = [
                       `[Realgoal Active Work Item · id=${state.id} · rev=${state.revision}]`,
                       `Kind: ${state.kind} | Phase: ${state.phase} | Status: ${state.runStatus} | Scope: ${state.completionScope}`,
+                      `Legal Next Phases: ${legalNext.length > 0 ? legalNext.join(", ") : "none (finish via realgoal_finish)"}`,
                       `Objective: ${state.objective}`,
                       `Draft Directory: ${paths.draftDir}`,
                       `TODOs: ${done}/${state.todos.length} done${Option.match(nextTodo, {
@@ -264,8 +306,10 @@ export const registerRealgoalHooks = (pi: ExtensionAPI, runtime: RealgoalRuntime
                         ? [`Pending Questions: ${pendingQs.map((q) => `${q.id} ("${q.title}")`).join(", ")}`]
                         : []),
                       `Next Action: ${state.nextAction}`,
+                      `Phase Contract: ${describePhaseContract(state, paths.finalizedPath)}`,
                       planningGuardLine,
                       `Completion Rule: Prose like [DONE] NEVER completes a workflow; record fresh evidence via realgoal_todo(record_evidence) and finish only via realgoal_finish.`,
+                      `Workflow Docs: Do NOT read Realgoal extension source code; load the 'realgoal' skill only if unsure about HTML previews, worker delegation, or rejected transitions.`,
                     ].join("\n") + scopeChangeNotice + readOnlyNotice
 
                     return {

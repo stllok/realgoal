@@ -15,6 +15,7 @@
   "files": [
     "index.ts",
     "extensions/",
+    "skills/",
     "src/",
     "docs/",
     "spec.md",
@@ -23,6 +24,9 @@
   "pi": {
     "extensions": [
       "./index.ts"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "scripts": {

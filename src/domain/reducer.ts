@@ -83,6 +83,13 @@ export const PLANNING_ONLY_PHASES: ReadonlySet<WorkflowPhase> = new Set<Workflow
 export const isPlanningPhase = (state: WorkItemState): boolean =>
   state.kind === "plan" && PLANNING_ONLY_PHASES.has(state.phase)
 
+export const getLegalNextPhases = (
+  state: Pick<WorkItemState, "kind" | "phase">,
+): ReadonlyArray<WorkflowPhase> => {
+  const table = state.kind === "goal" ? GOAL_LEGAL_NEXT : PLAN_LEGAL_NEXT
+  return [...(table[state.phase] ?? [])] as ReadonlyArray<WorkflowPhase>
+}
+
 export const inferCompletionScope = (objective: string, kind: WorkflowKind): CompletionScope => {
   const lower = objective.toLowerCase()
   const artifactOnly =

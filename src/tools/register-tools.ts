@@ -154,6 +154,12 @@ export const registerRealgoalTools = (
     label: "Realgoal Control",
     description:
       "Inspect or mutate the active Realgoal work item: status, checkpoint, advance phase, wait on realtasks, reconcile background tasks/workers, block, pause, finalize candidate spec/plan, publish user-authorized artifacts, or cleanup authorized tasks.",
+    promptSnippet:
+      "Inspect or advance active Realgoal (/goal or /plan) phase, checkpoint findings, wait on tasks, or finalize finalized.md",
+    promptGuidelines: [
+      "Only call realgoal_* tools when [Realgoal Active Work Item] is present in context; follow its Legal Next Phases and Phase Contract.",
+      "Never read Realgoal extension source files to learn workflow rules — read the realgoal skill only when unsure about previews, delegation, or rejected transitions.",
+    ],
     executionMode: "sequential",
     parameters: Type.Object({
       action: Type.Union([
@@ -171,7 +177,32 @@ export const registerRealgoalTools = (
       workItemId: Type.Optional(Type.String()),
       expectedRevision: Type.Optional(Type.Integer({ minimum: 1 })),
       operationId: Type.Optional(Type.String()),
-      targetPhase: Type.Optional(Type.String()),
+      targetPhase: Type.Optional(
+        Type.Union(
+          [
+            Type.Literal("explore"),
+            Type.Literal("analyze"),
+            Type.Literal("process"),
+            Type.Literal("verify"),
+            Type.Literal("discovery"),
+            Type.Literal("design"),
+            Type.Literal("analysis"),
+            Type.Literal("finalization"),
+            Type.Literal("draft_review"),
+            Type.Literal("publication_choice"),
+            Type.Literal("publication"),
+            Type.Literal("execution_choice"),
+            Type.Literal("lookup"),
+            Type.Literal("implement"),
+            Type.Literal("verify_item"),
+            Type.Literal("verify_goal"),
+          ],
+          {
+            description:
+              "Target phase for action='advance' (check Legal Next Phases in active context; /goal: explore|analyze|process|verify; /plan: discovery|design|analysis|finalization|draft_review|publication_choice|publication|execution_choice|lookup|implement|verify_item|verify_goal)",
+          },
+        ),
+      ),
       reason: Type.Optional(Type.String()),
       nextAction: Type.Optional(Type.String()),
       researchNotes: Type.Optional(Type.String()),
@@ -747,6 +778,8 @@ export const registerRealgoalTools = (
     label: "Realgoal TODO",
     description:
       "Inspect and mutate durable Realgoal TODO items: list, append, update, reorder, split, start, submit_for_verification, record_evidence, complete, block, reopen, or skip.",
+    promptSnippet:
+      "Manage Realgoal TODOs (start -> submit_for_verification -> record_evidence -> complete)",
     executionMode: "sequential",
     parameters: Type.Object({
       action: Type.Union([
@@ -766,7 +799,9 @@ export const registerRealgoalTools = (
       workItemId: Type.Optional(Type.String()),
       expectedRevision: Type.Optional(Type.Integer({ minimum: 1 })),
       operationId: Type.Optional(Type.String()),
-      todoId: Type.Optional(Type.String()),
+      todoId: Type.Optional(
+        Type.String({ description: "TODO ID such as 'T001' (/goal starts with implicit T001)" }),
+      ),
       items: Type.Optional(
         Type.Array(
           Type.Object({
@@ -801,7 +836,9 @@ export const registerRealgoalTools = (
       evidence: Type.Optional(
         Type.Object({
           id: Type.Optional(Type.String()),
-          criterionIds: Type.Array(Type.String()),
+          criterionIds: Type.Array(Type.String(), {
+            description: "Acceptance criterion IDs verified, e.g. ['C001']",
+          }),
           todoIds: Type.Optional(Type.Array(Type.String())),
           method: Type.Union([
             Type.Literal("executable_test"),
@@ -1019,6 +1056,8 @@ export const registerRealgoalTools = (
     label: "Realgoal Preview",
     description:
       "Validate and register static HTML/SVG visual mockup options inside <draft>/previews/<previewId>/ for local loopback browser comparison.",
+    promptSnippet:
+      "Register static .html/.svg mockup options under <draft>/previews/<previewId>/ before realgoal_question",
     executionMode: "sequential",
     parameters: Type.Object({
       previewId: Type.String(),
@@ -1032,7 +1071,10 @@ export const registerRealgoalTools = (
           title: Type.String(),
           description: Type.String(),
           rationale: Type.String(),
-          relativePath: Type.String(),
+          relativePath: Type.String({
+            description:
+              "Static .html or .svg path relative to <draft>/previews/<previewId>/ (no <script> or inline on*= handlers)",
+          }),
         }),
         { minItems: 1 },
       ),
@@ -1095,6 +1137,8 @@ export const registerRealgoalTools = (
     label: "Realgoal Question",
     description:
       "Create and present a durable clarification or design question with browser preview + Pi UI fallback and CAS resolution.",
+    promptSnippet:
+      "Ask a durable clarification/design question during /plan or /goal (optionally linked to realgoal_preview)",
     executionMode: "sequential",
     parameters: Type.Object({
       title: Type.String(),
@@ -1104,7 +1148,9 @@ export const registerRealgoalTools = (
       allowFreeText: Type.Optional(Type.Boolean()),
       multiSelect: Type.Optional(Type.Boolean()),
       allowDelegateToAgent: Type.Optional(Type.Boolean()),
-      previewId: Type.Optional(Type.String()),
+      previewId: Type.Optional(
+        Type.String({ description: "Optional previewId already registered via realgoal_preview" }),
+      ),
       workItemId: Type.Optional(Type.String()),
           options: Type.Optional(
         Type.Array(
@@ -1511,6 +1557,8 @@ export const registerRealgoalTools = (
     label: "Realgoal Delegate",
     description:
       "Dispatch an isolated Pi child worker (implementation, verification, or draft_review) via realtasks with tiered model/thinking resolution and strict JSONL/result.json validation.",
+    promptSnippet:
+      "Dispatch an isolated child Pi worker (implementation, verification, or draft_review)",
     executionMode: "sequential",
     parameters: Type.Object({
       role: Type.Union([
@@ -1529,7 +1577,9 @@ export const registerRealgoalTools = (
       contextFiles: Type.Optional(Type.Array(Type.String())),
       verificationCommands: Type.Optional(Type.Array(Type.String())),
       modelOverrideAuthId: Type.Optional(Type.String()),
-      enterWait: Type.Optional(Type.Boolean()),
+      enterWait: Type.Optional(
+        Type.Boolean({ description: "Set true to suspend workflow until the worker finishes" }),
+      ),
       workItemId: Type.Optional(Type.String()),
     }),
     execute: (_toolCallId, params, signal, _onUpdate, ctx) => {
@@ -1682,6 +1732,8 @@ export const registerRealgoalTools = (
     label: "Realgoal Finish",
     description:
       "Atomically verify and finish the active Realgoal work item. Rejects unless all required TODOs, fresh evidence, acceptance criteria, draft review gates, and background tasks are satisfied.",
+    promptSnippet:
+      "Atomically verify and finish the active Realgoal workflow once TODOs and evidence pass",
     executionMode: "sequential",
     parameters: Type.Object({
       summary: Type.String(),
@@ -1692,7 +1744,11 @@ export const registerRealgoalTools = (
       operationId: Type.Optional(Type.String()),
       evidenceIds: Type.Optional(Type.Array(Type.String())),
       retainedResourceIds: Type.Optional(Type.Array(Type.String())),
-      recordGoalLevelVerification: Type.Optional(Type.Boolean()),
+      recordGoalLevelVerification: Type.Optional(
+        Type.Boolean({
+          description: "Required true for implementation scope once final goal-level verification passes",
+        }),
+      ),
       workItemId: Type.Optional(Type.String()),
     }),
     execute: (toolCallId, params, signal, _onUpdate, ctx) => {

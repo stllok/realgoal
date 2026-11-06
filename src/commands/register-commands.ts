@@ -258,8 +258,8 @@ export const registerRealgoalCommands = (
                         pi,
                         ctx,
                         kind === "goal"
-                          ? `[Realgoal /goal started · id=${state.id} · draft=${paths.draftDir}]\nObjective: ${objective}\nBegin intake -> explore/analyze -> process -> verify using realgoal_control, realgoal_todo, and realgoal_finish.`
-                          : `[Realgoal /plan started · id=${state.id} · draft=${paths.draftDir}]\nObjective: ${objective}\nPlanning boundary is active: inspect context, capture findings/decisions in ${paths.draftDir}, clarify ambiguities with realgoal_question / realgoal_preview, write finalized.md, and do NOT modify repository files outside ${paths.draftDir} until user authorizes execution.`,
+                          ? `[Realgoal /goal started · id=${state.id} · draft=${paths.draftDir}]\nObjective: ${objective}\nAdvance intake -> explore|analyze -> process -> verify via realgoal_control, track/verify T001 via realgoal_todo, and finish via realgoal_finish(recordGoalLevelVerification: true).`
+                          : `[Realgoal /plan started · id=${state.id} · draft=${paths.draftDir}]\nObjective: ${objective}\nPlanning boundary is active: advance intake -> discovery|design|analysis -> finalization via realgoal_control, clarify ambiguities with realgoal_question / realgoal_preview, write ${paths.finalizedPath} and call realgoal_control(action: "finalize"), and do NOT modify repository files outside ${paths.draftDir} until user authorizes execution.`,
                       ),
                     ),
                     Effect.map(({ state }) =>

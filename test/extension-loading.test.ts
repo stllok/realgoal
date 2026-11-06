@@ -1,6 +1,12 @@
+import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import { describe, expect, test } from "bun:test"
-import { createEventBus, createExtensionRuntime, type ExtensionContext } from "@earendil-works/pi-coding-agent"
+import {
+  createEventBus,
+  createExtensionRuntime,
+  loadSkillsFromDir,
+  type ExtensionContext,
+} from "@earendil-works/pi-coding-agent"
 import { loadExtensionFromFactory } from "../node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js"
 import { ControllerService, createRealgoalExtension, makeRealgoalRuntime } from "../index.ts"
 import { createPiTestHarness } from "./helpers/pi-harness.ts"
@@ -68,6 +74,51 @@ describe("Extension loading lifecycle", () => {
       expect(memory.commandCollisions).toEqual([])
       await h.invokeCommand("goal", "Start after session replacement")
       expect(h.sentUserMessages.length).toBe(1)
+    } finally {
+      await h.cleanup()
+    }
+  })
+
+  test("exposes tool prompt metadata, phase-aware active context, and valid bundled skill", async () => {
+    const repoRoot = path.resolve(import.meta.dir, "..")
+    const pkg = JSON.parse(await fs.readFile(path.join(repoRoot, "package.json"), "utf8")) as {
+      files: string[]
+      pi: { skills?: string[] }
+    }
+    expect(pkg.files).toContain("skills/")
+    expect(pkg.pi.skills).toEqual(["./skills"])
+
+    const loadedSkills = loadSkillsFromDir({ dir: path.join(repoRoot, "skills"), source: "test" })
+    expect(loadedSkills.diagnostics).toEqual([])
+    expect(loadedSkills.skills.map((s) => s.name)).toEqual(["realgoal"])
+
+    const runtime = makeRealgoalRuntime()
+    try {
+      const extension = await loadExtensionFromFactory(
+        (pi) => { createRealgoalExtension({ runtime })(pi) },
+        repoRoot,
+        createEventBus(),
+        createExtensionRuntime(),
+      )
+      for (const [, registered] of extension.tools) {
+        expect(registered.definition.promptSnippet?.length).toBeGreaterThan(10)
+      }
+      const ctrlDef = extension.tools.get("realgoal_control")!.definition
+      expect(ctrlDef.promptGuidelines?.length).toBeGreaterThan(0)
+      const targetPhaseSchema = (ctrlDef.parameters as { properties: Record<string, { anyOf?: unknown[] }> }).properties["targetPhase"]
+      expect(targetPhaseSchema?.anyOf?.length).toBe(16)
+    } finally {
+      await runtime.dispose()
+    }
+
+    const h = await createPiTestHarness()
+    try {
+      await h.invokeCommand("plan", "Design a modular IRC client")
+      const injected = await h.emitBeforeAgentStart("continue")
+      const content = String(injected?.message?.content ?? "")
+      expect(content).toContain("Legal Next Phases: discovery, design, analysis")
+      expect(content).toContain("Phase Contract:")
+      expect(content).toContain("Do NOT read Realgoal extension source code")
     } finally {
       await h.cleanup()
     }
