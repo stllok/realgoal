@@ -8,7 +8,7 @@ Requires Pi `^1.5.0` and `st0nie/realtasks`:
 
 ```bash
 pi install git:github.com/st0nie/realtasks
-pi install ./path/to/realgoal
+pi install git:github.com/stllok/realgoal
 ```
 
 Or load for a single session without persisting settings:
