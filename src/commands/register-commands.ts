@@ -103,20 +103,6 @@ export const registerRealgoalCommands = (
   runtime: RealgoalRuntime,
   opts: RegisterCommandsOptions = {},
 ): void => {
-  const existingCommandNames = new Set(pi.getCommands().map((c) => c.name))
-  const collisions = ["goal", "plan", "realgoal"].filter((name) => existingCommandNames.has(name))
-
-  if (collisions.length > 0) {
-    void runtime.runPromise(
-      ControllerService.use((c) =>
-        c.updateMemory((mem) => ({
-          ...mem,
-          commandCollisions: collisions,
-        })),
-      ),
-    )
-  }
-
   const handleStartWorkflow = (
     kind: WorkflowKind,
     rawObjective: string,
@@ -1498,30 +1484,48 @@ export const registerRealgoalCommands = (
     }
   }
 
-  if (!existingCommandNames.has("goal")) {
-    pi.registerCommand("goal", {
-      description: "Start a lightweight iterative Realgoal /goal workflow",
-      handler: (args, ctx) => runtime.runCommandEffect(ctx, handleStartWorkflow("goal", args, ctx)),
-    })
-  }
+  // Action methods such as getCommands() are unavailable in the factory.
+  // Wait until every extension has loaded and Pi has bound the runtime.
+  let commandsRegistered = false
+  pi.on("session_start", () => {
+    if (commandsRegistered) return
+    const existingCommandNames = new Set(pi.getCommands().map((c) => c.name))
+    const collisions = ["goal", "plan", "realgoal"].filter((name) => existingCommandNames.has(name))
 
-  if (!existingCommandNames.has("plan")) {
-    pi.registerCommand("plan", {
-      description: "Start a structured Realgoal /plan discovery, review, publication, and execution workflow",
-      handler: (args, ctx) => runtime.runCommandEffect(ctx, handleStartWorkflow("plan", args, ctx)),
-    })
-  }
+    if (!existingCommandNames.has("goal")) {
+      pi.registerCommand("goal", {
+        description: "Start a lightweight iterative Realgoal /goal workflow",
+        handler: (args, ctx) => runtime.runCommandEffect(ctx, handleStartWorkflow("goal", args, ctx)),
+      })
+    }
 
-  if (!existingCommandNames.has("realgoal")) {
-    pi.registerCommand("realgoal", {
-      description: "Inspect and control Realgoal workflows (/realgoal [status|list|resume|pause|cancel|publish|execute|doctor|...])",
-      getArgumentCompletions: (prefix) => {
-        const trimmed = prefix.trim().toLowerCase()
-        if (trimmed.includes(" ")) return null
-        const matches = REALGOAL_SUBCOMMANDS.filter((sub) => sub.startsWith(trimmed))
-        return matches.length > 0 ? matches.map((m) => ({ value: m, label: m })) : null
-      },
-      handler: (args, ctx) => runtime.runCommandEffect(ctx, handleRealgoalAction(args, ctx)),
-    })
-  }
+    if (!existingCommandNames.has("plan")) {
+      pi.registerCommand("plan", {
+        description: "Start a structured Realgoal /plan discovery, review, publication, and execution workflow",
+        handler: (args, ctx) => runtime.runCommandEffect(ctx, handleStartWorkflow("plan", args, ctx)),
+      })
+    }
+
+    if (!existingCommandNames.has("realgoal")) {
+      pi.registerCommand("realgoal", {
+        description: "Inspect and control Realgoal workflows (/realgoal [status|list|resume|pause|cancel|publish|execute|doctor|...])",
+        getArgumentCompletions: (prefix) => {
+          const trimmed = prefix.trim().toLowerCase()
+          if (trimmed.includes(" ")) return null
+          const matches = REALGOAL_SUBCOMMANDS.filter((sub) => sub.startsWith(trimmed))
+          return matches.length > 0 ? matches.map((m) => ({ value: m, label: m })) : null
+        },
+        handler: (args, ctx) => runtime.runCommandEffect(ctx, handleRealgoalAction(args, ctx)),
+      })
+    }
+    commandsRegistered = true
+    return runtime.runPromise(
+      ControllerService.use((c) =>
+        c.updateMemory((mem) => ({
+          ...mem,
+          commandCollisions: collisions,
+        })),
+      ),
+    ).then(() => undefined)
+  })
 }
