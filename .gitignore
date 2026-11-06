@@ -1,0 +1,6 @@
+node_modules/
+.pi/realgoal/
+dist/
+*.log
+/.agents/skills/effect-ts
+/skills-lock.json
