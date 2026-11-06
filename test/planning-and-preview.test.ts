@@ -45,6 +45,13 @@ describe("§18.3 Planning and browser interaction (P01–P15)", () => {
 
       // Writing inside draft directory succeeds
       await fs.mkdir(loaded0.paths.draftDir, { recursive: true })
+      for (const p of [
+        path.join(loaded0.paths.draftDir, "previews", "opt", "a.html"),
+        path.relative(h.tempDir, path.join(loaded0.paths.draftDir, "previews", "opt", "b.html")),
+      ]) {
+        const legalWrite = await h.invokeTool("write", { path: p, content: "<p>x</p>" })
+        expect((legalWrite.details as any)?.blocked).toBeUndefined()
+      }
       await h.invokeTool("realgoal_control", {
         action: "advance",
         targetPhase: "discovery",

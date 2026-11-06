@@ -31,7 +31,7 @@ import {
   RealtasksAdapter,
   type ExtractedRealtasksHint,
 } from "../services/realtasks-adapter.ts"
-import { checkWorkerWriteAllowed } from "../services/worker-service.ts"
+import { isCandidateInsideRoot } from "../services/path-safety.ts"
 import {
   REALGOAL_CONTINUATION_MESSAGE_TYPE,
   REALGOAL_ENTRY_TYPE,
@@ -372,7 +372,8 @@ export const registerRealgoalHooks = (pi: ExtensionAPI, runtime: RealgoalRuntime
                     reason: "Blocked empty file path during Realgoal planning phase.",
                   })
                 }
-                return checkWorkerWriteAllowed(mem.workspaceCwd, [paths.draftDir], targetPath).pipe(
+                // Not checkWorkerWriteAllowed: it always rejects draft paths (worker-only protection).
+                return isCandidateInsideRoot(mem.workspaceCwd, paths.draftDir, targetPath).pipe(
                   Effect.map((insideDraft): ToolCallEventResult | undefined =>
                     insideDraft
                       ? undefined
