@@ -218,4 +218,78 @@ describe("§18.1 Workflow and continuation (W01–W10)", () => {
       await h.cleanup()
     }
   })
+
+  test("UI status omits current TODO title and /goal todo widget shows stage progression", async () => {
+    const h = await createPiTestHarness()
+    try {
+      await h.invokeCommand("goal", "Tighten compact footer status and show stages")
+
+      expect(h.ui.statuses.get("realgoal")).toBe("Goal · intake")
+      expect(h.ui.widgets.get("realgoal-todos")).toEqual([
+        "▶ Intake",
+        "○ Explore",
+        "○ Analyze",
+        "○ Process",
+        "○ Verify",
+      ])
+
+      // Skip explore directly to analyze
+      await h.invokeTool("realgoal_control", {
+        action: "advance",
+        targetPhase: "analyze",
+        reason: "Scope is localized to presentation.ts",
+        nextAction: "Proceed to process",
+      })
+      expect(h.ui.statuses.get("realgoal")).toBe("Goal · analyze")
+      expect(h.ui.widgets.get("realgoal-todos")).toEqual([
+        "✓ Intake",
+        "− Explore (skipped)",
+        "▶ Analyze",
+        "○ Process",
+        "○ Verify",
+      ])
+
+      // Revisit explore, then advance through analyze -> process -> verify
+      await h.invokeTool("realgoal_control", {
+        action: "advance",
+        targetPhase: "explore",
+        reason: "Check callers",
+        nextAction: "Analyze callers",
+      })
+      await h.invokeTool("realgoal_control", {
+        action: "advance",
+        targetPhase: "analyze",
+        reason: "Callers checked",
+        nextAction: "Implement",
+      })
+      await h.invokeTool("realgoal_control", {
+        action: "advance",
+        targetPhase: "process",
+        reason: "Ready to edit",
+        nextAction: "Verify",
+      })
+      expect(h.ui.statuses.get("realgoal")).toBe("Goal · process")
+      expect(h.ui.widgets.get("realgoal-todos")).toEqual([
+        "✓ Intake",
+        "✓ Explore",
+        "✓ Analyze",
+        "▶ Process",
+        "○ Verify",
+      ])
+
+      // Appending a second explicit TODO switches widget to explicit TODO list and shows count without current TODO title
+      await h.invokeTool("realgoal_todo", {
+        action: "append",
+        items: [{ title: "Add regression test", description: "Cover UI status and widget" }],
+      })
+      expect(h.ui.statuses.get("realgoal")).toBe("Goal · process · 0/2 done")
+      expect(h.ui.statuses.get("realgoal")).not.toContain("T001")
+      expect(h.ui.widgets.get("realgoal-todos")).toEqual([
+        "○ T001 Tighten compact footer status and show stages",
+        "○ T002 Add regression test",
+      ])
+    } finally {
+      await h.cleanup()
+    }
+  })
 })

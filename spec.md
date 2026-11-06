@@ -903,7 +903,7 @@ V1 validates `execution.maxConcurrentWriters` as `1`; a larger value is unsuppor
 Use Pi status/widgets rather than replacing its footer globally. Examples:
 
 ```text
-Goal · verify · 4/5 done · T005 integration checks
+Goal · verify · 4/5 done
 Plan · awaiting answer · Q007 navigation layout
 Goal · waiting · b-… build · resume: verify
 Goal · paused · repeated failure 3/3 · /realgoal resume
