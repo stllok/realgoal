@@ -484,7 +484,7 @@ export const advancePhase = (
       }
 
       if (state.kind === "plan") {
-        if (params.targetPhase === "finalization" && Option.isNone(state.finalizedCandidateHash)) {
+        if (params.targetPhase === "draft_review" && Option.isNone(state.finalizedCandidateHash)) {
           return Effect.fail(
             new InvalidTransitionError({
               workItemId: state.id,
@@ -492,7 +492,7 @@ export const advancePhase = (
               toPhase: params.targetPhase,
               fromStatus: state.runStatus,
               toStatus: state.runStatus,
-              reason: "finalized.md must be registered via finalize before entering finalization/publication",
+              reason: "finalized.md must be registered via finalize before entering draft_review/publication",
               missingConditions: ["Register candidate finalized.md via realgoal_control(action: 'finalize')"],
             }),
           )

@@ -445,8 +445,11 @@ describe("§18.3 Planning and browser interaction (P01–P15)", () => {
       const afterEsc = await h.runtime.runPromise(ControllerService.use((c) => c.requireWorkItem()))
       expect(afterEsc.state.revision).toBe(loaded0.state.revision)
 
-      await h.invokeTool("realgoal_control", { action: "advance", targetPhase: "discovery" })
-      await h.invokeTool("realgoal_control", { action: "advance", targetPhase: "finalization" })
+      const advDisc = await h.invokeTool("realgoal_control", { action: "advance", targetPhase: "discovery" })
+      expect(advDisc.isError).toBeUndefined()
+      const advFin = await h.invokeTool("realgoal_control", { action: "advance", targetPhase: "finalization" })
+      expect(advFin.isError).toBeUndefined()
+      expect((advFin.details as any).phase).toBe("finalization")
 
       // Write valid implementation plan content to finalized.md
       const validPlanMarkdown = [
@@ -461,9 +464,19 @@ describe("§18.3 Planning and browser interaction (P01–P15)", () => {
       ].join("\n\n")
       await fs.writeFile(loaded0.paths.finalizedPath, validPlanMarkdown, "utf8")
 
+      // Interactive menu inside finalize: choosing "Continue refining" returns to design (running), then re-finalize
+      h.ui.selectQueue.push((_title, opts) => opts.find((o) => o.includes("Continue refining")))
+      const refineFinRes = await h.invokeTool("realgoal_control", { action: "finalize" })
+      expect(refineFinRes.isError).toBeUndefined()
+      expect((refineFinRes.details as any).phase).toBe("design")
+      expect((refineFinRes.details as any).runStatus).toBe("running")
+      expect(refineFinRes.terminate).toBeUndefined()
+
+      // Dismissing menu (or empty selectQueue) leaves work item in publication_choice (awaiting_user) without terminate
       const finRes = await h.invokeTool("realgoal_control", { action: "finalize" })
       expect(finRes.isError).toBeUndefined()
       expect((finRes.details as any).phase).toBe("publication_choice")
+      expect(finRes.terminate).toBeUndefined()
       // Zero workers launched when gate is disabled
       const afterFin = await h.runtime.runPromise(ControllerService.use((c) => c.requireWorkItem()))
       expect(afterFin.state.workers.length).toBe(0)

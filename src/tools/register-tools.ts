@@ -16,7 +16,9 @@ import type {
   DecisionRecord,
   Difficulty,
   EvidenceRecord,
+  ExecutionDriver,
   QuestionAnswer,
+  VerificationDriver,
   TaskWaitCondition,
   TodoReviewSummary,
   WorkerRole,
@@ -618,18 +620,397 @@ export const registerRealgoalTools = (
                       ),
                       Effect.flatMap((nextState) =>
                         controller.saveUpdatedState(state, nextState).pipe(
-                          Effect.map(() => ({
-                            summary: `Finalized candidate registered (sha256=${finHash.slice(0, 12)}…). Next phase: ${nextState.phase}, status: ${nextState.runStatus}, rev: ${nextState.revision}.`,
-                            details: {
-                              workItemId: nextState.id,
-                              revision: nextState.revision,
-                              phase: nextState.phase,
-                              runStatus: nextState.runStatus,
-                              finalizedHash: finHash,
-                              manifestHash: computeCurrentManifestHash(nextState, finHash),
-                            },
-                            terminate: nextState.runStatus === "awaiting_user",
-                          })),
+                          Effect.flatMap((): Effect.Effect<ToolSuccessEnvelope, RealgoalError> => {
+                            const makeEnvelope = (
+                              s: WorkItemState,
+                              extraSummary?: string,
+                            ): ToolSuccessEnvelope => ({
+                              summary: extraSummary
+                                ? `Finalized candidate registered (sha256=${finHash.slice(0, 12)}…). ${extraSummary} Next phase: ${s.phase}, status: ${s.runStatus}, rev: ${s.revision}.`
+                                : `Finalized candidate registered (sha256=${finHash.slice(0, 12)}…). Next phase: ${s.phase}, status: ${s.runStatus}, rev: ${s.revision}.`,
+                              details: {
+                                workItemId: s.id,
+                                revision: s.revision,
+                                phase: s.phase,
+                                runStatus: s.runStatus,
+                                finalizedHash: finHash,
+                                manifestHash: computeCurrentManifestHash(s, finHash),
+                              },
+                              ...(!ctx.hasUI && s.runStatus === "awaiting_user" ? { terminate: true } : {}),
+                            })
+
+                            if (!ctx.hasUI || nextState.phase !== "publication_choice") {
+                              return Effect.succeed(makeEnvelope(nextState))
+                            }
+
+                            const specDefaultPath = path.join(
+                              effCfg.config.publication.specDirectory,
+                              `${nextState.safeDirName}.md`,
+                            )
+                            const planDefaultPath = path.join(
+                              effCfg.config.publication.planDirectory,
+                              `${nextState.safeDirName}.md`,
+                            )
+                            const OPT_SPEC = `1. Write specification to ${specDefaultPath}`
+                            const OPT_PLAN = `2. Write implementation plan to ${planDefaultPath}`
+                            const OPT_BOTH = `3. Write both specification and implementation plan`
+                            const OPT_REFINE = `4. Continue refining before writing anything`
+                            const OPT_STOP = `5. Stop here and keep draft only`
+
+                            return Effect.tryPromise({
+                              try: () =>
+                                ctx.ui.select(
+                                  `Publish finalized artifacts for "${nextState.displayName}" (${nextState.safeDirName}):`,
+                                  [OPT_SPEC, OPT_PLAN, OPT_BOTH, OPT_REFINE, OPT_STOP],
+                                  signal ? { signal } : undefined,
+                                ),
+                              catch: () => undefined,
+                            }).pipe(
+                              Effect.orElseSucceed(() => undefined),
+                              Effect.flatMap((picked): Effect.Effect<ToolSuccessEnvelope, RealgoalError> => {
+                                const choice =
+                                  picked === OPT_SPEC
+                                    ? ("spec" as const)
+                                    : picked === OPT_PLAN
+                                      ? ("plan" as const)
+                                      : picked === OPT_BOTH
+                                        ? ("both" as const)
+                                        : picked === OPT_REFINE
+                                          ? ("refine" as const)
+                                          : picked === OPT_STOP
+                                            ? ("stop" as const)
+                                            : undefined
+
+                                if (!choice) {
+                                  return Effect.succeed(makeEnvelope(nextState))
+                                }
+
+                                const menuNowIso = new Date().toISOString()
+
+                                if (choice === "refine") {
+                                  return advancePhase(nextState, {
+                                    expectedRevision: nextState.revision,
+                                    operationId: `${opId}_refine`,
+                                    targetPhase: "design",
+                                    reason: "User selected 'Continue refining' at publication menu",
+                                    nextAction: "Refine finalized.md based on user feedback, then re-finalize.",
+                                    origin: "user",
+                                    draftGateEnabled: effCfg.config.verification.draftGate.enabled,
+                                    nowIso: menuNowIso,
+                                  }).pipe(
+                                    Effect.flatMap((refined) =>
+                                      controller
+                                        .saveUpdatedState(nextState, refined)
+                                        .pipe(Effect.map(() => makeEnvelope(refined, "User selected 'Continue refining'; returned to design."))),
+                                    ),
+                                  )
+                                }
+
+                                if (choice === "stop") {
+                                  const parked = pauseWorkItem(
+                                    nextState,
+                                    "User selected 'Stop here and keep draft only' at publication menu",
+                                    "user",
+                                    menuNowIso,
+                                  )
+                                  return controller
+                                    .saveUpdatedState(nextState, parked)
+                                    .pipe(
+                                      Effect.map(() =>
+                                        makeEnvelope(parked, `Stopped and kept draft at ${loaded.paths.draftDir}.`),
+                                      ),
+                                    )
+                                }
+
+                                const targets: ReadonlyArray<"spec" | "plan"> =
+                                  choice === "both" ? ["spec", "plan"] : [choice]
+                                const authKind =
+                                  choice === "both"
+                                    ? ("publish_both" as const)
+                                    : choice === "spec"
+                                      ? ("publish_spec" as const)
+                                      : ("publish_plan" as const)
+
+                                return controller
+                                  .createUserAuthorization({
+                                    state: nextState,
+                                    kind: authKind,
+                                    summary: `User authorized ${authKind} at finalize publication menu`,
+                                    artifactHash: nextState.finalizedCandidateHash,
+                                    nowIso: menuNowIso,
+                                  })
+                                  .pipe(
+                                    Effect.flatMap(({ state: stateWithAuth, auth }) =>
+                                      Effect.reduce(
+                                        targets,
+                                        () => ({ curState: stateWithAuth, written: [] as ReadonlyArray<string> }),
+                                        (acc, target) => {
+                                          const destDir =
+                                            target === "spec"
+                                              ? effCfg.config.publication.specDirectory
+                                              : effCfg.config.publication.planDirectory
+                                          const candidateFile = path.resolve(
+                                            mem.workspaceCwd,
+                                            destDir,
+                                            `${acc.curState.safeDirName}.md`,
+                                          )
+                                          return Effect.tryPromise({
+                                            try: () =>
+                                              fs
+                                                .access(candidateFile)
+                                                .then(() => true)
+                                                .catch(() => false),
+                                            catch: () => false,
+                                          }).pipe(
+                                            Effect.orElseSucceed(() => false),
+                                            Effect.flatMap((exists) => {
+                                              if (!exists) {
+                                                return Effect.succeed({ allowOverwrite: false, skip: false })
+                                              }
+                                              return Effect.tryPromise({
+                                                try: () =>
+                                                  ctx.ui.confirm(
+                                                    `Overwrite existing ${target} file?`,
+                                                    `${candidateFile} already exists. Overwrite it?`,
+                                                  ),
+                                                catch: () => false,
+                                              }).pipe(
+                                                Effect.orElseSucceed(() => false),
+                                                Effect.map((confirmed) => ({
+                                                  allowOverwrite: confirmed,
+                                                  skip: !confirmed,
+                                                })),
+                                              )
+                                            }),
+                                            Effect.flatMap(({ allowOverwrite, skip }) => {
+                                              if (skip) return Effect.succeed(acc)
+                                              return persistence
+                                                .publishMarkdownArtifact({
+                                                  workspaceCwd: mem.workspaceCwd,
+                                                  configDirName: mem.configDirName,
+                                                  state: acc.curState,
+                                                  callerOwner: controller.makeOwnerToken(mem),
+                                                  target,
+                                                  destinationDir: destDir,
+                                                  content,
+                                                  authorizationId: auth.id,
+                                                  allowOverwrite,
+                                                  draftGateEnabled: effCfg.config.verification.draftGate.enabled,
+                                                  nowIso: menuNowIso,
+                                                })
+                                                .pipe(
+                                                  Effect.map((res) => ({
+                                                    curState: res.state,
+                                                    written: [...acc.written, res.writtenPath],
+                                                  })),
+                                                )
+                                            }),
+                                          )
+                                        },
+                                      ).pipe(
+                                        Effect.tapError(() =>
+                                          controller
+                                            .saveUpdatedState(stateWithAuth, {
+                                              ...stateWithAuth,
+                                              revision: stateWithAuth.revision + 1,
+                                              phase: "finalization",
+                                              runStatus: "running",
+                                              nextAction:
+                                                "Fix finalized.md validation errors (ensure Goal, ## stages, in-scope/out-of-scope, acceptance checks, and no TBD), then re-run finalize.",
+                                              updatedAt: menuNowIso,
+                                            })
+                                            .pipe(Effect.ignore),
+                                        ),
+                                      ),
+                                    ),
+                                    Effect.flatMap(({ curState, written }): Effect.Effect<ToolSuccessEnvelope, RealgoalError> => {
+                                      if (written.length === 0) {
+                                        return Effect.succeed(
+                                          makeEnvelope(curState, "Publication cancelled (existing file not overwritten)."),
+                                        )
+                                      }
+                                      if (curState.completionScope === "artifact") {
+                                        const artRunning: WorkItemState = {
+                                          ...curState,
+                                          revision: curState.revision + 1,
+                                          runStatus: "running",
+                                          nextAction:
+                                            "Published artifact; record fresh evidence for acceptance criteria and call realgoal_finish(completionScope: 'artifact').",
+                                          updatedAt: menuNowIso,
+                                        }
+                                        return controller
+                                          .saveUpdatedState(curState, artRunning)
+                                          .pipe(
+                                            Effect.map(() =>
+                                              makeEnvelope(artRunning, `Published ${written.join(", ")}.`),
+                                            ),
+                                          )
+                                      }
+                                      if (choice === "spec") {
+                                        const parkedSpec = pauseWorkItem(
+                                          curState,
+                                          `User published specification only (${written.join(", ")})`,
+                                          "user",
+                                          menuNowIso,
+                                        )
+                                        return controller
+                                          .saveUpdatedState(curState, parkedSpec)
+                                          .pipe(
+                                            Effect.map(() =>
+                                              makeEnvelope(parkedSpec, `Published specification to ${written.join(", ")}.`),
+                                            ),
+                                          )
+                                      }
+
+                                      const toExecChoice: WorkItemState = {
+                                        ...curState,
+                                        revision: curState.revision + 1,
+                                        phase: "execution_choice",
+                                        runStatus: "awaiting_user",
+                                        nextAction:
+                                          "Await user execution choice (/realgoal execute): Direct-driven, Subagent-driven, or Stop here.",
+                                        updatedAt: menuNowIso,
+                                      }
+
+                                      return controller.saveUpdatedState(curState, toExecChoice).pipe(
+                                        Effect.flatMap((): Effect.Effect<ToolSuccessEnvelope, RealgoalError> => {
+                                          const OPT_DIRECT =
+                                            "1. Execute now: Direct-driven (current session implements sequentially)"
+                                          const OPT_SUBAGENT =
+                                            "2. Execute now: Subagent-driven (isolated worker per TODO)"
+                                          const OPT_EXEC_STOP =
+                                            "3. Stop here (keep published plan/spec without implementing)"
+
+                                          return Effect.tryPromise({
+                                            try: async (): Promise<
+                                              Option.Option<{
+                                                readonly exec: ExecutionDriver | "stop"
+                                                readonly verify: VerificationDriver
+                                              }>
+                                            > => {
+                                              const execPicked = await ctx.ui.select(
+                                                `Choose execution mode for "${toExecChoice.displayName}":`,
+                                                [OPT_DIRECT, OPT_SUBAGENT, OPT_EXEC_STOP],
+                                                signal ? { signal } : undefined,
+                                              )
+                                              if (execPicked === undefined) return Option.none()
+                                              if (execPicked === OPT_EXEC_STOP) {
+                                                return Option.some({
+                                                  exec: "stop" as const,
+                                                  verify: toExecChoice.verificationDriver,
+                                                })
+                                              }
+                                              const execMode: ExecutionDriver =
+                                                execPicked === OPT_SUBAGENT ? "subagent" : "direct"
+                                              const V_DIRECT =
+                                                "Verification: Direct (parent session verifies each TODO)"
+                                              const V_SUB =
+                                                "Verification: Subagent (independent read-only reviewer per TODO)"
+                                              const verifyPicked = await ctx.ui.select(
+                                                `Choose verification driver for "${toExecChoice.displayName}":`,
+                                                effCfg.config.verification.executionDriver === "subagent"
+                                                  ? [V_SUB, V_DIRECT]
+                                                  : [V_DIRECT, V_SUB],
+                                                signal ? { signal } : undefined,
+                                              )
+                                              const verifyMode: VerificationDriver =
+                                                verifyPicked === V_SUB
+                                                  ? "subagent"
+                                                  : verifyPicked === V_DIRECT
+                                                    ? "direct"
+                                                    : effCfg.config.verification.executionDriver
+                                              return Option.some({ exec: execMode, verify: verifyMode })
+                                            },
+                                            catch: () => Option.none(),
+                                          }).pipe(
+                                            Effect.orElseSucceed(() => Option.none()),
+                                            Effect.flatMap((execChoiceOpt): Effect.Effect<ToolSuccessEnvelope, RealgoalError> =>
+                                              Option.match(execChoiceOpt, {
+                                                onNone: () =>
+                                                  Effect.succeed(
+                                                    makeEnvelope(
+                                                      toExecChoice,
+                                                      `Published ${written.join(", ")}. Run /realgoal execute to choose Direct-driven, Subagent-driven, or Stop here.`,
+                                                    ),
+                                                  ),
+                                                onSome: ({ exec, verify }) => {
+                                                  const execNowIso = new Date().toISOString()
+                                                  if (exec === "stop") {
+                                                    const parkedExec = pauseWorkItem(
+                                                      toExecChoice,
+                                                      "User selected 'Stop here' at execution menu; implementation not started",
+                                                      "user",
+                                                      execNowIso,
+                                                    )
+                                                    return controller
+                                                      .saveUpdatedState(toExecChoice, parkedExec)
+                                                      .pipe(
+                                                        Effect.map(() =>
+                                                          makeEnvelope(
+                                                            parkedExec,
+                                                            `Published ${written.join(", ")}. Stopped before implementation.`,
+                                                          ),
+                                                        ),
+                                                      )
+                                                  }
+
+                                                  const execAuthKind =
+                                                    exec === "subagent"
+                                                      ? ("execute_subagent" as const)
+                                                      : ("execute_direct" as const)
+                                                  return controller
+                                                    .createUserAuthorization({
+                                                      state: toExecChoice,
+                                                      kind: execAuthKind,
+                                                      summary: `User authorized ${exec} execution + ${verify} verification at finalize execution menu`,
+                                                      artifactHash: toExecChoice.finalizedCandidateHash,
+                                                      nowIso: execNowIso,
+                                                    })
+                                                    .pipe(
+                                                      Effect.flatMap(({ state: withExecAuth }) => {
+                                                        const prepped: WorkItemState = {
+                                                          ...withExecAuth,
+                                                          phase: "execution_choice",
+                                                          runStatus: "running",
+                                                          executionDriver: Option.some(exec),
+                                                          verificationDriver: verify,
+                                                        }
+                                                        return advancePhase(prepped, {
+                                                          expectedRevision: prepped.revision,
+                                                          operationId: `${opId}_exec`,
+                                                          targetPhase: "lookup",
+                                                          reason: `Authorized ${exec} execution + ${verify} verification`,
+                                                          nextAction: `Populate/confirm ordered TODOs in lookup, then implement (${exec}) and verify (${verify}).`,
+                                                          origin: "user",
+                                                          draftGateEnabled:
+                                                            effCfg.config.verification.draftGate.enabled,
+                                                          nowIso: execNowIso,
+                                                        })
+                                                      }),
+                                                      Effect.flatMap((execState) =>
+                                                        controller
+                                                          .saveUpdatedState(toExecChoice, execState)
+                                                          .pipe(
+                                                            Effect.map(() =>
+                                                              makeEnvelope(
+                                                                execState,
+                                                                `Published ${written.join(", ")}. Authorized execution=${exec}, verification=${verify}.`,
+                                                              ),
+                                                            ),
+                                                          ),
+                                                      ),
+                                                    )
+                                                },
+                                              }),
+                                            ),
+                                          )
+                                        }),
+                                      )
+                                    }),
+                                  )
+                              }),
+                            )
+                          }),
                         ),
                       ),
                     )

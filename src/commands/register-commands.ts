@@ -332,10 +332,10 @@ export const registerRealgoalCommands = (
                 )
 
         return resolveChoiceEff.pipe(
-          Effect.flatMap((choiceOpt): Effect.Effect<Option.Option<string>, RealgoalError> =>
+          Effect.flatMap((choiceOpt): Effect.Effect<Option.Option<string>, RealgoalError, RealgoalServices> =>
             Option.match(choiceOpt, {
               onNone: () => Effect.succeed(Option.none()),
-              onSome: (choice): Effect.Effect<Option.Option<string>, RealgoalError> => {
+              onSome: (choice): Effect.Effect<Option.Option<string>, RealgoalError, RealgoalServices> => {
                 const nowIso = new Date().toISOString()
                 if (choice === "refine") {
                   return advancePhase(state, {
@@ -349,9 +349,16 @@ export const registerRealgoalCommands = (
                     nowIso,
                   }).pipe(
                     Effect.flatMap((nextState) =>
-                      controller
-                        .saveUpdatedState(state, nextState)
-                        .pipe(Effect.as(Option.some("Returned to design phase for further refinement."))),
+                      controller.saveUpdatedState(state, nextState).pipe(
+                        Effect.tap(() =>
+                          triggerWorkflowKickoff(
+                            pi,
+                            ctx,
+                            `[Realgoal resumed · id=${nextState.id}]\nUser selected 'Continue refining' at publication menu. Refine ${loaded.paths.finalizedPath} in phase 'design', then re-run realgoal_control(action: "finalize").`,
+                          ),
+                        ),
+                        Effect.as(Option.some("Returned to design phase for further refinement.")),
+                      ),
                     ),
                   )
                 }
@@ -468,7 +475,7 @@ export const registerRealgoalCommands = (
                             },
                           ),
                         ),
-                        Effect.flatMap(({ curState, written }): Effect.Effect<Option.Option<string>, RealgoalError> => {
+                        Effect.flatMap(({ curState, written }): Effect.Effect<Option.Option<string>, RealgoalError, RealgoalServices> => {
                           if (written.length === 0) {
                             return Effect.succeed(Option.some("Publication cancelled (existing file not overwritten)."))
                           }
@@ -489,11 +496,24 @@ export const registerRealgoalCommands = (
                             updatedAt: nowIso,
                           }
                           return controller.saveUpdatedState(curState, toExecChoice).pipe(
-                            Effect.as(
-                              Option.some(
-                                `Published ${written.join(", ")}. Run /realgoal execute to choose Direct-driven, Subagent-driven, or Stop here.`,
-                              ),
-                            ),
+                            Effect.flatMap(() => {
+                              if (trimmed === "" && ctx.hasUI && (choice === "plan" || choice === "both")) {
+                                return handleExecuteMenuOrArg("", ctx).pipe(
+                                  Effect.map((execResOpt) =>
+                                    Option.isSome(execResOpt)
+                                      ? Option.some(`Published ${written.join(", ")}. ${execResOpt.value}`)
+                                      : Option.some(
+                                          `Published ${written.join(", ")}. Run /realgoal execute to choose Direct-driven, Subagent-driven, or Stop here.`,
+                                        ),
+                                  ),
+                                )
+                              }
+                              return Effect.succeed(
+                                Option.some(
+                                  `Published ${written.join(", ")}. Run /realgoal execute to choose Direct-driven, Subagent-driven, or Stop here.`,
+                                ),
+                              )
+                            }),
                           )
                         }),
                       )
