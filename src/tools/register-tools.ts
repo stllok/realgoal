@@ -565,7 +565,20 @@ export const registerRealgoalTools = (
               }
 
               case "pause": {
-                const reason = params.reason ?? "Paused by agent tool"
+                const reason = typeof params.reason === "string" ? params.reason.trim() : ""
+                if (reason.length === 0) {
+                  return Effect.fail(
+                    new InvalidTransitionError({
+                      workItemId: state.id,
+                      fromPhase: state.phase,
+                      toPhase: state.phase,
+                      fromStatus: state.runStatus,
+                      toStatus: "paused",
+                      reason: "realgoal_control(action: 'pause') requires a non-empty reason",
+                      missingConditions: ["Provide a non-empty reason when marking the workflow as paused"],
+                    }),
+                  )
+                }
                 const nextState = pauseWorkItem(state, reason, "agent_tool", nowIso)
                 return controller.saveUpdatedState(state, nextState).pipe(
                   Effect.map(() => ({

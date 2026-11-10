@@ -19,7 +19,6 @@ import {
   getLegalNextPhases,
   isPlanningPhase,
   pauseWorkItem,
-  recordOperationFailure,
   selectNextEligibleTodo,
 } from "../domain/reducer.ts"
 import type { RealgoalRuntime, RealgoalServices } from "../bridge/pi-wrapper.ts"
@@ -153,8 +152,11 @@ export const registerRealgoalHooks = (pi: ExtensionAPI, runtime: RealgoalRuntime
           const reattachEff: Effect.Effect<void, RealgoalError> = matchingSessionItem
             ? (() => {
                 const nowIso = new Date().toISOString()
-                const wasRunning = matchingSessionItem.state.runStatus === "running"
-                const stabilized: WorkItemState = wasRunning
+                const shouldPauseOnCrash =
+                  matchingSessionItem.state.runStatus === "running" &&
+                  (matchingSessionItem.state.phase === "process" ||
+                    matchingSessionItem.state.phase === "implement")
+                const stabilized: WorkItemState = shouldPauseOnCrash
                   ? pauseWorkItem(
                       matchingSessionItem.state,
                       `Session ${event.reason}: auto-resume disabled until /realgoal resume`,
@@ -170,7 +172,7 @@ export const registerRealgoalHooks = (pi: ExtensionAPI, runtime: RealgoalRuntime
                   }))
                   .pipe(
                     Effect.flatMap(() =>
-                      wasRunning
+                      shouldPauseOnCrash
                         ? controller
                             .saveUpdatedState(matchingSessionItem.state, stabilized)
                             .pipe(Effect.asVoid, Effect.catch(() => Effect.void))
@@ -467,23 +469,6 @@ export const registerRealgoalHooks = (pi: ExtensionAPI, runtime: RealgoalRuntime
                 )
               }
 
-              if (event.isError && !event.toolName.startsWith("realgoal_") && state.runStatus === "running") {
-                return controller.getEffectiveConfig(Option.some(state)).pipe(
-                  Effect.flatMap((effCfg) => {
-                    const afterFail = recordOperationFailure(
-                      state,
-                      `tool_error:${event.toolName}`,
-                      `Tool '${event.toolName}' failed`,
-                      effCfg.config,
-                      nowIso,
-                    )
-                    return afterFail.runStatus !== state.runStatus ||
-                      afterFail.progress.repeatedFailureCount !== state.progress.repeatedFailureCount
-                      ? controller.saveUpdatedState(state, afterFail).pipe(Effect.asVoid)
-                      : Effect.void
-                  }),
-                )
-              }
 
               return Effect.void
             },

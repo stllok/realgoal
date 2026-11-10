@@ -28,7 +28,7 @@ import {
   applyTodoMutation,
   createDurableQuestion,
   createInitialWorkItem,
-  pauseWorkItem,
+  blockWorkItem,
   recordDraftReviewReport,
   recordOperationFailure,
   resolveQuestionCAS,
@@ -604,7 +604,7 @@ export class ControllerService extends Context.Service<
                       )
                       return Effect.succeed(
                         valErr.status === "blocked"
-                          ? pauseWorkItem(afterFailure, valErr.reason, "recovery", params.nowIso)
+                          ? blockWorkItem(afterFailure, valErr.reason, "recovery", params.nowIso)
                           : afterFailure,
                       )
                     }),

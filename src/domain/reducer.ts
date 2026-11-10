@@ -2041,8 +2041,8 @@ export const resumeWorkItem = (
 export const recordOperationFailure = (
   state: WorkItemState,
   fingerprint: string,
-  errorSummary: string,
-  config: ResolvedRealgoalConfig,
+  _errorSummary: string,
+  _config: ResolvedRealgoalConfig,
   nowIso: string,
 ): WorkItemState => {
   if (state.runStatus === "waiting_task" || state.runStatus === "awaiting_user") {
@@ -2052,27 +2052,12 @@ export const recordOperationFailure = (
     Option.isSome(state.progress.lastFailureFingerprint) &&
     state.progress.lastFailureFingerprint.value === fingerprint
   const nextCount = sameAsLast ? state.progress.repeatedFailureCount + 1 : 1
-  const threshold = config.continuation.maxRepeatedFailureAttempts
 
   const updatedProgress = {
     ...state.progress,
     repeatedFailureCount: nextCount,
     lastFailureFingerprint: Option.some(fingerprint),
     recentFingerprints: [...state.progress.recentFingerprints.slice(-15), fingerprint],
-  }
-
-  if (nextCount >= threshold && state.runStatus === "running") {
-    const reason = `Repeated failure ${nextCount}/${threshold} (${fingerprint}): ${errorSummary}`
-    const transitions = appendTransition(state, state.phase, "paused", reason, "recovery", nowIso)
-    const bumped = bumpRevision(state, nowIso)
-    return {
-      ...bumped,
-      runStatus: "paused",
-      pauseOrBlockReason: Option.some(reason),
-      progress: updatedProgress,
-      nextAction: `Paused after repeated failure (${nextCount}/${threshold}). Provide guidance, change approach, /realgoal resume, or /realgoal cancel.`,
-      transitions,
-    }
   }
 
   return {
@@ -2138,43 +2123,9 @@ export const decideBeforeSettle = (
     return { nextState: state, shouldContinue: false, reminderMessage: Option.none() }
   }
 
-  if (Option.isSome(params.config.continuation.maxTotalTurns)) {
-    const cap = params.config.continuation.maxTotalTurns.value
-    if (state.progress.totalContinuations >= cap) {
-      const paused = pauseWorkItem(
-        state,
-        `Configured continuation.maxTotalTurns (${cap}) reached`,
-        "recovery",
-        params.nowIso,
-      )
-      return { nextState: paused, shouldContinue: false, reminderMessage: Option.none() }
-    }
-  }
-
   const nextNoProgress = params.hadQualifyingProgressSinceLastContinuation
     ? 0
     : state.progress.noProgressContinuations + 1
-
-  if (nextNoProgress >= params.config.continuation.maxNoProgressContinuations) {
-    const reason = `No qualifying progress for ${nextNoProgress}/${params.config.continuation.maxNoProgressContinuations} continuations in phase '${state.phase}'`
-    const transitions = appendTransition(state, state.phase, "paused", reason, "recovery", params.nowIso)
-    const bumped = bumpRevision(state, params.nowIso)
-    return {
-      shouldContinue: false,
-      reminderMessage: Option.none(),
-      nextState: {
-        ...bumped,
-        runStatus: "paused",
-        pauseOrBlockReason: Option.some(reason),
-        nextAction: `${reason}. Offer guidance, change approach, /realgoal resume, or /realgoal cancel.`,
-        progress: {
-          ...bumped.progress,
-          noProgressContinuations: nextNoProgress,
-        },
-        transitions,
-      },
-    }
-  }
 
   const nextTodoOpt = selectNextEligibleTodo(state.todos)
   const doneCount = state.todos.filter((t) => t.status === "done").length

@@ -143,7 +143,7 @@ describe("§18.1 Workflow and continuation (W01–W10)", () => {
     }
   })
 
-  test("W07 & W08: No-progress threshold pauses cleanly, while >15 productive turns never hit an arbitrary turn cap", async () => {
+  test("W07 & W08: Only pauses on agent mark pause (with reason), user interrupt, or crash in process/implement; tool_error and no-progress do not pause", async () => {
     const h = await createPiTestHarness()
     try {
       await h.invokeCommand("goal", "Multi-step refactor")
@@ -160,20 +160,56 @@ describe("§18.1 Workflow and continuation (W01–W10)", () => {
         expect(s.continue).toBe(true)
       }
 
-      // W07: Now 3 consecutive no-progress continuations hit default maxNoProgressContinuations=3
+      // W07: Repeated tool_error and consecutive no-progress continuations do NOT pause
+      for (let i = 1; i <= 5; i++) {
+        const errTool = await h.invokeTool("task_output", { id: "t_missing" })
+        expect(errTool.isError).toBe(true)
+      }
       const np1 = await h.emitAgentBeforeSettle({ contextLen: 30 })
       expect(np1.continue).toBe(true)
       const np2 = await h.emitAgentBeforeSettle({ contextLen: 31 })
       expect(np2.continue).toBe(true)
       const np3 = await h.emitAgentBeforeSettle({ contextLen: 32 })
-      expect(np3.continue).toBe(false)
+      expect(np3.continue).toBe(true)
 
-      const stalled = await h.runtime.runPromise(
+      const stillRunning = await h.runtime.runPromise(
         ControllerService.use((c) => c.requireWorkItem()),
       )
-      expect(stalled.state.runStatus).toBe("paused")
-      expect(Option.getOrElse(stalled.state.pauseOrBlockReason, () => "")).toContain(
-        "No qualifying progress",
+      expect(stillRunning.state.runStatus).toBe("running")
+
+      // Crash recovery in non-process phase ('intake') does NOT pause
+      await h.emitSessionStart("startup")
+      const afterIntakeCrash = await h.runtime.runPromise(
+        ControllerService.use((c) => c.requireWorkItem()),
+      )
+      expect(afterIntakeCrash.state.runStatus).toBe("running")
+
+      // Advance to process -> crash recovery in 'process' phase DOES pause
+      await h.invokeTool("realgoal_control", { action: "advance", targetPhase: "explore" })
+      await h.invokeTool("realgoal_control", { action: "advance", targetPhase: "analyze" })
+      await h.invokeTool("realgoal_control", { action: "advance", targetPhase: "process" })
+      await h.emitSessionStart("startup")
+      const afterProcessCrash = await h.runtime.runPromise(
+        ControllerService.use((c) => c.requireWorkItem()),
+      )
+      expect(afterProcessCrash.state.runStatus).toBe("paused")
+
+      // Resume, then test agent pause requires a non-empty reason
+      await h.invokeCommand("realgoal", "resume")
+      const badPause = await h.invokeTool("realgoal_control", { action: "pause" })
+      expect(badPause.isError).toBe(true)
+
+      const goodPause = await h.invokeTool("realgoal_control", {
+        action: "pause",
+        reason: "Waiting for external schema migration window",
+      })
+      expect(goodPause.isError).toBeUndefined()
+      const agentPaused = await h.runtime.runPromise(
+        ControllerService.use((c) => c.requireWorkItem()),
+      )
+      expect(agentPaused.state.runStatus).toBe("paused")
+      expect(Option.getOrElse(agentPaused.state.pauseOrBlockReason, () => "")).toBe(
+        "Waiting for external schema migration window",
       )
     } finally {
       await h.cleanup()
