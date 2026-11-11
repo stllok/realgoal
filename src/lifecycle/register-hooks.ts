@@ -200,7 +200,6 @@ export const registerRealgoalHooks = (pi: ExtensionAPI, runtime: RealgoalRuntime
         }),
       ),
       undefined,
-      ctx.signal,
     ).then(() => runtime.refreshUi(ctx)),
   )
 
@@ -476,7 +475,6 @@ export const registerRealgoalHooks = (pi: ExtensionAPI, runtime: RealgoalRuntime
         }),
       ),
       undefined,
-      ctx.signal,
     ).then(() => runtime.refreshUi(ctx)),
   )
 
@@ -534,7 +532,6 @@ export const registerRealgoalHooks = (pi: ExtensionAPI, runtime: RealgoalRuntime
         }),
       ),
       undefined,
-      ctx.signal,
     ).then(() => runtime.refreshUi(ctx)),
   )
 
@@ -698,7 +695,6 @@ export const registerRealgoalHooks = (pi: ExtensionAPI, runtime: RealgoalRuntime
           }),
         ),
         undefined,
-        ctx.signal,
       )
       .then((res) => runtime.refreshUi(ctx).then(() => res)),
   )

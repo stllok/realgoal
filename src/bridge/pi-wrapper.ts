@@ -5,7 +5,7 @@ import type {
   ExtensionContext,
   ExtensionToolContext,
 } from "@earendil-works/pi-coding-agent"
-import { Effect, ManagedRuntime, Option } from "effect"
+import { Cause, Effect, Exit, ManagedRuntime, Option } from "effect"
 import { ConfigService } from "../domain/config.ts"
 import { toStructuredError, type RealgoalError } from "../domain/errors.ts"
 import type { ThinkingLevelValue } from "../domain/models.ts"
@@ -89,6 +89,13 @@ export const formatToolFailure = (
     isError: true,
   }
 }
+
+export const formatToolAborted = (): AgentToolResult<Record<string, unknown>> => ({
+  content: [{ type: "text", text: "Operation aborted." }],
+  details: { ok: false, aborted: true },
+  structuredContent: { ok: false, aborted: true },
+  isError: true,
+})
 
 export const makeToolInvoker = (ctx: ExtensionToolContext): ToolInvoker =>
   (name: string, args: Record<string, unknown>, signal?: AbortSignal): Effect.Effect<ToolInvokeOutcome, never> =>
@@ -259,14 +266,28 @@ export const makeRealgoalRuntime = (): RealgoalRuntime => {
       ),
     )
 
-  const refreshUi = (ctx: ExtensionContext): Promise<void> => runPromise(refreshUiEffect(ctx))
+  const runExit = <A, E>(
+    effect: Effect.Effect<A, E, RealgoalServices>,
+    signal?: AbortSignal,
+  ): Promise<Exit.Exit<A, E>> =>
+    signal ? managed.runPromiseExit(effect, { signal }) : managed.runPromiseExit(effect)
+
+  const resolveInterruptibleExit = <A>(exit: Exit.Exit<A, never>, onInterrupt: () => A): Promise<A> =>
+    Exit.isSuccess(exit)
+      ? Promise.resolve(exit.value)
+      : Cause.hasInterruptsOnly(exit.cause)
+        ? Promise.resolve(onInterrupt())
+        : Promise.reject(Cause.squash(exit.cause))
+
+  const refreshUi = (ctx: ExtensionContext): Promise<void> =>
+    runExit(refreshUiEffect(ctx)).then((exit) => resolveInterruptibleExit(exit, () => undefined))
 
   const runToolEffect = (
     ctx: ExtensionToolContext,
     signal: AbortSignal | undefined,
     effect: Effect.Effect<ToolSuccessEnvelope, RealgoalError, RealgoalServices>,
   ): Promise<AgentToolResult<Record<string, unknown>>> =>
-    runPromise(
+    runExit(
       effect.pipe(
         Effect.tap(() => refreshUiEffect(ctx)),
         Effect.match({
@@ -275,13 +296,13 @@ export const makeRealgoalRuntime = (): RealgoalRuntime => {
         }),
       ),
       signal,
-    )
+    ).then((exit) => resolveInterruptibleExit(exit, () => formatToolAborted()))
 
   const runCommandEffect = (
     ctx: ExtensionCommandContext,
     effect: Effect.Effect<Option.Option<string>, RealgoalError, RealgoalServices>,
   ): Promise<void> =>
-    runPromise(
+    runExit(
       effect.pipe(
         Effect.tap(() => refreshUiEffect(ctx)),
         Effect.matchEffect({
@@ -300,19 +321,18 @@ export const makeRealgoalRuntime = (): RealgoalRuntime => {
             }),
         }),
       ),
-      ctx.signal,
-    )
+      ctx.signal && !ctx.signal.aborted ? ctx.signal : undefined,
+    ).then((exit) => resolveInterruptibleExit(exit, () => undefined))
 
   const runEventEffect = <A>(
     effect: Effect.Effect<A, RealgoalError, RealgoalServices>,
     fallback: A,
     signal?: AbortSignal,
   ): Promise<A> =>
-    runPromise(
+    runExit(
       effect.pipe(Effect.orElseSucceed(() => fallback)),
       signal,
-    )
-
+    ).then((exit) => resolveInterruptibleExit(exit, () => fallback))
   return {
     managed,
     runPromise,

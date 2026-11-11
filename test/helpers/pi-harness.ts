@@ -66,25 +66,26 @@ export interface PiTestHarness {
   registeredProviders: string[]
   unauthenticatedModels: Set<string>
   readonly registerExtraHandler: (event: string, fn: (ev: any, ctx: any) => any) => void
-  readonly invokeCommand: (name: string, args?: string) => Promise<void>
+  readonly invokeCommand: (name: string, args?: string, signal?: AbortSignal) => Promise<void>
   readonly invokeTool: (
     name: string,
     params: Record<string, unknown>,
     opts?: { toolCallId?: string; parentToolCallId?: string; signal?: AbortSignal },
   ) => Promise<AgentToolResult<any>>
-  readonly emitSessionStart: (reason?: "startup" | "reload" | "new" | "resume" | "fork") => Promise<void>
+  readonly emitSessionStart: (reason?: "startup" | "reload" | "new" | "resume" | "fork", signal?: AbortSignal) => Promise<void>
   readonly emitAgentStart: () => Promise<void>
   readonly emitAgentEnd: () => Promise<void>
   readonly emitInput: (text: string, source?: "interactive" | "rpc" | "extension") => Promise<InputEventResult>
-  readonly emitBeforeAgentStart: (prompt?: string) => Promise<BeforeAgentStartEventResult | undefined>
-  readonly emitMessageEnd: (message: Record<string, unknown>) => Promise<void>
+  readonly emitBeforeAgentStart: (prompt?: string, signal?: AbortSignal) => Promise<BeforeAgentStartEventResult | undefined>
+  readonly emitMessageEnd: (message: Record<string, unknown>, signal?: AbortSignal) => Promise<void>
   readonly emitAgentBeforeSettle: (params?: {
     entries?: SessionBoundaryDraft[]
     continue?: boolean
     outcome?: "completed" | "aborted" | "error"
     contextLen?: number
+    signal?: AbortSignal
   }) => Promise<AgentBeforeSettleEventResult>
-  readonly emitAgentSettled: (aborted?: boolean) => Promise<void>
+  readonly emitAgentSettled: (aborted?: boolean, signal?: AbortSignal) => Promise<void>
   readonly emitSessionBeforeSwitch: () => Promise<void>
   readonly emitSessionShutdown: (reason?: "quit" | "reload" | "new" | "resume" | "fork") => Promise<void>
   readonly cleanup: () => Promise<void>
@@ -631,11 +632,11 @@ export const createPiTestHarness = async (options?: {
       list.push(fn)
       handlers.set(event, list)
     },
-    async invokeCommand(name: string, args = "") {
+    async invokeCommand(name: string, args = "", signal?: AbortSignal) {
       const cmd = commands.get(name)
       if (!cmd) throw new Error(`Command not registered: /${name}`)
       const cmdCtx = {
-        ...makeBaseCtx(),
+        ...makeBaseCtx(signal),
         getSystemPromptOptions: () => ({}),
         waitForIdle: async () => undefined,
         newSession: async () => ({ cancelled: false }),
@@ -647,8 +648,8 @@ export const createPiTestHarness = async (options?: {
       await cmd.handler(args, cmdCtx)
     },
     invokeTool,
-    async emitSessionStart(reason = "startup") {
-      const ctx = makeBaseCtx()
+    async emitSessionStart(reason = "startup", signal?: AbortSignal) {
+      const ctx = makeBaseCtx(signal)
       for (const h of handlers.get("session_start") ?? []) {
         await h({ type: "session_start", reason }, ctx)
       }
@@ -674,8 +675,8 @@ export const createPiTestHarness = async (options?: {
       }
       return finalRes
     },
-    async emitBeforeAgentStart(prompt = "user prompt") {
-      const ctx = makeBaseCtx()
+    async emitBeforeAgentStart(prompt = "user prompt", signal?: AbortSignal) {
+      const ctx = makeBaseCtx(signal)
       let out: BeforeAgentStartEventResult | undefined
       for (const h of handlers.get("before_agent_start") ?? []) {
         const r = await h({ type: "before_agent_start", messageType: "user", prompt }, ctx)
@@ -683,14 +684,14 @@ export const createPiTestHarness = async (options?: {
       }
       return out
     },
-    async emitMessageEnd(message: Record<string, unknown>) {
-      const ctx = makeBaseCtx()
+    async emitMessageEnd(message: Record<string, unknown>, signal?: AbortSignal) {
+      const ctx = makeBaseCtx(signal)
       for (const h of handlers.get("message_end") ?? []) {
         await h({ type: "message_end", message }, ctx)
       }
     },
     async emitAgentBeforeSettle(params) {
-      const ctx = makeBaseCtx()
+      const ctx = makeBaseCtx(params?.signal)
       let entries: SessionBoundaryDraft[] = [...(params?.entries ?? [])]
       let cont = Boolean(params?.continue)
       const outcome = params?.outcome ?? "completed"
@@ -715,8 +716,8 @@ export const createPiTestHarness = async (options?: {
       }
       return { entries, continue: cont }
     },
-    async emitAgentSettled(aborted = false) {
-      const ctx = makeBaseCtx()
+    async emitAgentSettled(aborted = false, signal?: AbortSignal) {
+      const ctx = makeBaseCtx(signal)
       for (const h of handlers.get("agent_settled") ?? []) {
         await h({ type: "agent_settled", aborted }, ctx)
       }

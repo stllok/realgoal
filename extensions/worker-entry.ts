@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import type { AgentToolResult, ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { Type } from "typebox"
-import { Effect, Layer, ManagedRuntime, Option, Predicate, Schema } from "effect"
+import { Cause, Effect, Exit, Layer, ManagedRuntime, Option, Predicate, Schema } from "effect"
 import { RoleGuardError } from "../src/domain/errors.ts"
 import {
   WorkerRequestJson,
@@ -98,64 +98,73 @@ export default function realgoalWorkerExtension(pi: ExtensionAPI): void {
   })
 
   pi.on("tool_call", (event, ctx) =>
-    runtime.runPromise(
-      loadWorkerRequest(requestFile).pipe(
-        Effect.flatMap((req) => {
-          if (PARENT_ONLY_TOOLS.has(event.toolName)) {
-            return Effect.succeed({
-              block: true,
-              reason: `Delegated ${req.role} worker cannot invoke parent controller tool "${event.toolName}" or recursively delegate.`,
-            })
-          }
-
-          if (req.role !== "implementation" && MUTATING_BUILTIN_TOOLS.has(event.toolName)) {
-            return Effect.succeed({
-              block: true,
-              reason: `Delegated ${req.role} reviewer is read-only and cannot invoke "${event.toolName}".`,
-            })
-          }
-
-          if (
-            req.role === "implementation" &&
-            (event.toolName === "write" || event.toolName === "edit")
-          ) {
-            const rawInput = Predicate.isObject(event.input)
-              ? (event.input as Record<string, unknown>)
-              : {}
-            const candidatePath =
-              typeof rawInput["path"] === "string"
-                ? rawInput["path"]
-                : typeof rawInput["file_path"] === "string"
-                  ? rawInput["file_path"]
-                  : ""
-            if (!candidatePath) {
+    runtime
+      .runPromiseExit(
+        loadWorkerRequest(requestFile).pipe(
+          Effect.flatMap((req) => {
+            if (PARENT_ONLY_TOOLS.has(event.toolName)) {
               return Effect.succeed({
                 block: true,
-                reason: `Missing path argument on ${event.toolName}`,
+                reason: `Delegated ${req.role} worker cannot invoke parent controller tool "${event.toolName}" or recursively delegate.`,
               })
             }
-            return checkWorkerWriteAllowed(ctx.cwd, req.allowedWritePaths, candidatePath).pipe(
-              Effect.map((allowed) =>
-                allowed
-                  ? undefined
-                  : {
-                      block: true,
-                      reason: `Path "${candidatePath}" is outside allowed worker write scope (or targets protected Realgoal draft state).`,
-                    },
-              ),
-            )
-          }
 
-          return Effect.succeed(undefined)
-        }),
-        Effect.catch((err) =>
-          Effect.succeed({
-            block: true,
-            reason: err.reason,
+            if (req.role !== "implementation" && MUTATING_BUILTIN_TOOLS.has(event.toolName)) {
+              return Effect.succeed({
+                block: true,
+                reason: `Delegated ${req.role} reviewer is read-only and cannot invoke "${event.toolName}".`,
+              })
+            }
+
+            if (
+              req.role === "implementation" &&
+              (event.toolName === "write" || event.toolName === "edit")
+            ) {
+              const rawInput = Predicate.isObject(event.input)
+                ? (event.input as Record<string, unknown>)
+                : {}
+              const candidatePath =
+                typeof rawInput["path"] === "string"
+                  ? rawInput["path"]
+                  : typeof rawInput["file_path"] === "string"
+                    ? rawInput["file_path"]
+                    : ""
+              if (!candidatePath) {
+                return Effect.succeed({
+                  block: true,
+                  reason: `Missing path argument on ${event.toolName}`,
+                })
+              }
+              return checkWorkerWriteAllowed(ctx.cwd, req.allowedWritePaths, candidatePath).pipe(
+                Effect.map((allowed) =>
+                  allowed
+                    ? undefined
+                    : {
+                        block: true,
+                        reason: `Path "${candidatePath}" is outside allowed worker write scope (or targets protected Realgoal draft state).`,
+                      },
+                ),
+              )
+            }
+
+            return Effect.succeed(undefined)
           }),
+          Effect.catch((err) =>
+            Effect.succeed({
+              block: true,
+              reason: err.reason,
+            }),
+          ),
         ),
+        ctx.signal ? { signal: ctx.signal } : undefined,
+      )
+      .then((exit) =>
+        Exit.isSuccess(exit)
+          ? exit.value
+          : Cause.hasInterruptsOnly(exit.cause)
+            ? undefined
+            : Promise.reject(Cause.squash(exit.cause)),
       ),
-    ),
   )
 
   pi.registerTool({
@@ -164,63 +173,76 @@ export default function realgoalWorkerExtension(pi: ExtensionAPI): void {
     description:
       "Submit the structured final result for this delegated Realgoal worker job and terminate the worker run.",
     parameters: WorkerResultToolParams,
-    execute: (_toolCallId, params) =>
-      runtime.runPromise(
-        loadWorkerRequest(requestFile).pipe(
-          Effect.flatMap((req) => {
-            const findings: ReadonlyArray<ReviewFinding> = (params.findings ?? []).map((f) => ({
-              id: f.id,
-              severity: f.severity,
-              locationOrRequirement: f.locationOrRequirement,
-              explanation: f.explanation,
-              suggestedResolution: f.suggestedResolution,
-              resolved: false,
-            }))
+    execute: (_toolCallId, params, signal) =>
+      runtime
+        .runPromiseExit(
+          loadWorkerRequest(requestFile).pipe(
+            Effect.flatMap((req) => {
+              const findings: ReadonlyArray<ReviewFinding> = (params.findings ?? []).map((f) => ({
+                id: f.id,
+                severity: f.severity,
+                locationOrRequirement: f.locationOrRequirement,
+                explanation: f.explanation,
+                suggestedResolution: f.suggestedResolution,
+                resolved: false,
+              }))
 
-            const payload: WorkerResultPayload = {
-              schemaVersion: 1,
-              jobId: req.jobId,
-              workItemId: req.workItemId,
-              role: req.role,
-              todoId: req.todoId,
-              inputArtifactHash: req.inputArtifactHash,
-              inputManifestHash: req.inputManifestHash,
-              status: params.status,
-              verdict: Option.fromUndefinedOr(params.verdict),
-              summary: params.summary,
-              filesChanged: (params.filesChanged ?? []).map((p) => path.normalize(p)),
-              deviations: params.deviations ?? [],
-              findings,
-              checksRun: (params.checksRun ?? []).map((c) => ({
-                commandOrCheck: c.commandOrCheck,
-                passed: c.passed,
-                exitCode:
-                  c.exitCode !== undefined ? Option.some(Math.trunc(c.exitCode)) : Option.none(),
-                outputSummary: c.outputSummary,
-              })),
-              needsInputQuestion: Option.fromUndefinedOr(params.needsInputQuestion),
-              timestamp: new Date().toISOString(),
-            }
+              const payload: WorkerResultPayload = {
+                schemaVersion: 1,
+                jobId: req.jobId,
+                workItemId: req.workItemId,
+                role: req.role,
+                todoId: req.todoId,
+                inputArtifactHash: req.inputArtifactHash,
+                inputManifestHash: req.inputManifestHash,
+                status: params.status,
+                verdict: Option.fromUndefinedOr(params.verdict),
+                summary: params.summary,
+                filesChanged: (params.filesChanged ?? []).map((p) => path.normalize(p)),
+                deviations: params.deviations ?? [],
+                findings,
+                checksRun: (params.checksRun ?? []).map((c) => ({
+                  commandOrCheck: c.commandOrCheck,
+                  passed: c.passed,
+                  exitCode:
+                    c.exitCode !== undefined ? Option.some(Math.trunc(c.exitCode)) : Option.none(),
+                  outputSummary: c.outputSummary,
+                })),
+                needsInputQuestion: Option.fromUndefinedOr(params.needsInputQuestion),
+                timestamp: new Date().toISOString(),
+              }
 
-            return Schema.encodeEffect(WorkerResultJson)(payload).pipe(
-              Effect.flatMap((encoded) =>
-                atomicWriteTextFile(resultFile, JSON.stringify(JSON.parse(encoded), null, 2) + "\n"),
-              ),
-              Effect.map((): AgentToolResult<Record<string, unknown>> => ({
-                content: [{ type: "text" as const, text: `Recorded worker result (${payload.status}).` }],
-                details: { ok: true, jobId: req.jobId, status: payload.status },
-                terminate: true,
-              })),
-            )
-          }),
-          Effect.catch((err) =>
-            Effect.succeed<AgentToolResult<Record<string, unknown>>>({
-              content: [{ type: "text" as const, text: `Failed recording worker result: ${String(err)}` }],
-              details: { ok: false, error: String(err) },
-              isError: true,
+              return Schema.encodeEffect(WorkerResultJson)(payload).pipe(
+                Effect.flatMap((encoded) =>
+                  atomicWriteTextFile(resultFile, JSON.stringify(JSON.parse(encoded), null, 2) + "\n"),
+                ),
+                Effect.map((): AgentToolResult<Record<string, unknown>> => ({
+                  content: [{ type: "text" as const, text: `Recorded worker result (${payload.status}).` }],
+                  details: { ok: true, jobId: req.jobId, status: payload.status },
+                  terminate: true,
+                })),
+              )
             }),
+            Effect.catch((err) =>
+              Effect.succeed<AgentToolResult<Record<string, unknown>>>({
+                content: [{ type: "text" as const, text: `Failed recording worker result: ${String(err)}` }],
+                details: { ok: false, error: String(err) },
+                isError: true,
+              }),
+            ),
           ),
+          signal ? { signal } : undefined,
+        )
+        .then((exit): AgentToolResult<Record<string, unknown>> =>
+          Exit.isSuccess(exit)
+            ? exit.value
+            : Cause.hasInterruptsOnly(exit.cause)
+              ? {
+                  content: [{ type: "text" as const, text: "Operation aborted." }],
+                  details: { ok: false, aborted: true },
+                  isError: true,
+                }
+              : Promise.reject(Cause.squash(exit.cause)) as never,
         ),
-      ),
   })
 }

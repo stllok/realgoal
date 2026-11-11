@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Option } from "effect"
+import { Effect, Option } from "effect"
 import { ControllerService } from "../index.ts"
 import { createPiTestHarness } from "./helpers/pi-harness.ts"
 
@@ -324,6 +324,96 @@ describe("§18.1 Workflow and continuation (W01–W10)", () => {
         "○ T001 Tighten compact footer status and show stages",
         "○ T002 Add regression test",
       ])
+    } finally {
+      await h.cleanup()
+    }
+  })
+
+  test("Gracefully handles pre-aborted and mid-flight AbortSignal without throwing 'All fibers interrupted without error'", async () => {
+    const h = await createPiTestHarness()
+    try {
+      await h.invokeCommand("goal", "Verify abort interruption handling")
+      const aborted = AbortSignal.abort()
+
+      // Pre-aborted ctx.signal across before_agent_start, tool execution, message_end, settle, and slash commands
+      const beforeStart = await h.emitBeforeAgentStart("continue", aborted)
+      expect(beforeStart).toBeUndefined()
+
+      const abortedTool = await h.invokeTool(
+        "realgoal_control",
+        { action: "status" },
+        { signal: aborted },
+      )
+      expect(abortedTool.isError).toBe(true)
+      expect(abortedTool.details).toEqual({ ok: false, aborted: true })
+      expect((abortedTool.content[0] as { text: string }).text).toBe("Operation aborted.")
+
+      // Exact reproduction of ExtensionRunner.emitMessageEnd during streamAssistantResponse abort
+      await h.emitMessageEnd(
+        {
+          role: "assistant",
+          stopReason: "aborted",
+          content: [],
+        },
+        aborted,
+      )
+
+      const settleRes = await h.emitAgentBeforeSettle({
+        outcome: "aborted",
+        contextLen: 4,
+        signal: aborted,
+      })
+      expect(settleRes.continue).toBe(false)
+
+      await h.emitAgentSettled(true, aborted)
+      const pausedAfterAbort = await h.runtime.runPromise(
+        ControllerService.use((c) => c.requireWorkItem()),
+      )
+      expect(pausedAfterAbort.state.runStatus).toBe("paused")
+
+      // Slash command invoked while previous run's signal is still aborted executes cleanly
+      const sentBefore = h.sentMessages.length
+      await h.invokeCommand("realgoal", "status", aborted)
+      expect(h.sentMessages.length).toBeGreaterThan(sentBefore)
+
+      // Mid-flight fiber interruptions on runEventEffect, runToolEffect, and runCommandEffect resolve gracefully
+      const eventCtrl = new AbortController()
+      setTimeout(() => eventCtrl.abort(), 10)
+      const eventVal = await h.runtime.runEventEffect(
+        Effect.sleep("5 seconds").pipe(Effect.as("done")),
+        "fallback",
+        eventCtrl.signal,
+      )
+      expect(eventVal).toBe("fallback")
+
+      const cmdCtrl = new AbortController()
+      setTimeout(() => cmdCtrl.abort(), 10)
+      await h.runtime.runCommandEffect(
+        {
+          hasUI: false,
+          signal: cmdCtrl.signal,
+          ui: { setStatus() {}, setWidget() {}, notify() {} },
+        } as any,
+        Effect.sleep("5 seconds").pipe(Effect.as(Option.some("done"))),
+      )
+
+      const toolCtrl = new AbortController()
+      setTimeout(() => toolCtrl.abort(), 10)
+      const midFlightTool = await h.runtime.runToolEffect(
+        {
+          hasUI: false,
+          ui: { setStatus() {}, setWidget() {}, notify() {} },
+        } as any,
+        toolCtrl.signal,
+        Effect.sleep("5 seconds").pipe(Effect.as({ summary: "done", details: {} })),
+      )
+      expect(midFlightTool.isError).toBe(true)
+      expect(midFlightTool.details).toEqual({ ok: false, aborted: true })
+
+      // Non-interrupt defects still reject rather than being swallowed
+      await expect(
+        h.runtime.runEventEffect(Effect.die(new Error("unexpected-defect")), "fallback"),
+      ).rejects.toThrow("unexpected-defect")
     } finally {
       await h.cleanup()
     }

@@ -1539,13 +1539,14 @@ export const registerRealgoalCommands = (
       })
     }
     commandsRegistered = true
-    return runtime.runPromise(
+    return runtime.runEventEffect(
       ControllerService.use((c) =>
         c.updateMemory((mem) => ({
           ...mem,
           commandCollisions: collisions,
         })),
-      ),
-    ).then(() => undefined)
+      ).pipe(Effect.asVoid),
+      undefined,
+    )
   })
 }
