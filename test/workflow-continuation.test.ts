@@ -418,4 +418,80 @@ describe("§18.1 Workflow and continuation (W01–W10)", () => {
       await h.cleanup()
     }
   })
+
+  test("Startup title generation uses current session model via streamSimple for /goal and /plan with safe fallback", async () => {
+    const h = await createPiTestHarness()
+    try {
+      const seenCalls: Array<{ model: any; context: any; options: any }> = []
+      h.mockStreamSimple = async (model, context, options) => {
+        seenCalls.push({ model, context, options })
+        return {
+          stopReason: "stop",
+          content: [{ type: "text", text: 'Title: "Hide Idle Status Bar Text."' }],
+        }
+      }
+
+      const weirdPrompt =
+        "The below text info doesn't need to show the current status bar when idle, please remove it cleanly"
+      await h.invokeCommand("goal", weirdPrompt)
+
+      expect(seenCalls.length).toBe(1)
+      expect(seenCalls[0]?.model.id).toBe("claude-sonnet-4-5")
+      expect(seenCalls[0]?.options.reasoning).toBeUndefined()
+      expect(seenCalls[0]?.options.maxTokens).toBe(64)
+
+      const goalLoaded = await h.runtime.runPromise(
+        ControllerService.use((c) => c.requireWorkItem()),
+      )
+      expect(goalLoaded.state.displayName).toBe("Hide Idle Status Bar Text")
+      expect(goalLoaded.state.safeDirName).toBe("Hide-Idle-Status-Bar-Text")
+      expect(goalLoaded.state.todos[0]?.title).toBe("Hide Idle Status Bar Text")
+      expect(goalLoaded.paths.draftDir).toContain("Hide-Idle-Status-Bar-Text")
+      expect(goalLoaded.paths.draftDir).not.toContain("The-below-text-info")
+      expect(h.sentUserMessages[0]).toContain(weirdPrompt)
+
+      // Cancel active goal, switch to mandatory-reasoning model, and verify /plan + minimal reasoning
+      await h.invokeCommand("realgoal", "cancel")
+      h.model = {
+        provider: "openai",
+        id: "gpt-5",
+        reasoning: true,
+        thinkingLevelMap: { off: null, minimal: "minimal" },
+      }
+      h.mockStreamSimple = async (model, context, options) => {
+        seenCalls.push({ model, context, options })
+        return {
+          stopReason: "stop",
+          content: [{ type: "text", text: "# Resumable Webhook Retry Pipeline" }],
+        }
+      }
+
+      await h.invokeCommand("plan", "Please read the notes below carefully before planning:\nBuild webhook retry")
+      expect(seenCalls.length).toBe(2)
+      expect(seenCalls[1]?.options.reasoning).toBe("minimal")
+      expect(seenCalls[1]?.options.maxTokens).toBe(320)
+
+      const planLoaded = await h.runtime.runPromise(
+        ControllerService.use((c) => c.requireWorkItem()),
+      )
+      expect(planLoaded.state.displayName).toBe("Resumable Webhook Retry Pipeline")
+      expect(planLoaded.state.safeDirName).toBe("Resumable-Webhook-Retry-Pipeline")
+
+      // Verify provider failure gracefully falls back to prompt-derived title
+      await h.invokeCommand("realgoal", "cancel")
+      h.mockStreamSimple = async () => ({
+        stopReason: "error",
+        content: [],
+      })
+
+      await h.invokeCommand("goal", "/fallback slash-prefixed objective line")
+      const fallbackLoaded = await h.runtime.runPromise(
+        ControllerService.use((c) => c.requireWorkItem()),
+      )
+      expect(fallbackLoaded.state.displayName).toBe("fallback slash-prefixed objective line")
+      expect(fallbackLoaded.state.safeDirName).toBe("fallback-slash-prefixed-objective-line")
+    } finally {
+      await h.cleanup()
+    }
+  })
 })

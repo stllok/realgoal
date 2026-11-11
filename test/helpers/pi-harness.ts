@@ -61,10 +61,18 @@ export interface PiTestHarness {
   isTrusted: boolean
   idle: boolean
   activeTools: string[]
-  model: { provider: string; id: string; reasoning: boolean }
+  model: {
+    provider: string
+    id: string
+    reasoning: boolean
+    thinkingLevelMap?: Record<string, string | null | undefined>
+  }
   thinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
   registeredProviders: string[]
   unauthenticatedModels: Set<string>
+  mockStreamSimple:
+    | ((model: any, context: any, options: any) => Promise<any> | any)
+    | undefined
   readonly registerExtraHandler: (event: string, fn: (ev: any, ctx: any) => any) => void
   readonly invokeCommand: (name: string, args?: string, signal?: AbortSignal) => Promise<void>
   readonly invokeTool: (
@@ -145,10 +153,22 @@ export const createPiTestHarness = async (options?: {
     isTrusted: options?.isTrusted ?? true,
     idle: true,
     activeTools: [] as string[],
-    model: { provider: "anthropic", id: "claude-sonnet-4-5", reasoning: true },
+    model: {
+      provider: "anthropic",
+      id: "claude-sonnet-4-5",
+      reasoning: true,
+    } as {
+      provider: string
+      id: string
+      reasoning: boolean
+      thinkingLevelMap?: Record<string, string | null | undefined>
+    },
     thinkingLevel: "medium" as "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max",
     registeredProviders: [] as string[],
     unauthenticatedModels: new Set<string>(),
+    mockStreamSimple: undefined as
+      | ((model: any, context: any, options: any) => Promise<any> | any)
+      | undefined,
   }
 
   const registerMockRealtasks = (api: ExtensionAPI): void => {
@@ -456,6 +476,13 @@ export const createPiTestHarness = async (options?: {
         hasConfiguredAuth: (m: { provider: string; id: string }) =>
           !harnessState.unauthenticatedModels.has(`${m.provider}/${m.id}`),
         getRegisteredProviderIds: () => harnessState.registeredProviders,
+        ...(harnessState.mockStreamSimple
+          ? {
+              streamSimple: (model: any, context: any, opts: any) => ({
+                result: async () => harnessState.mockStreamSimple!(model, context, opts),
+              }),
+            }
+          : {}),
       },
       model: harnessState.model,
       scopedModels: [],
@@ -626,6 +653,12 @@ export const createPiTestHarness = async (options?: {
     },
     set unauthenticatedModels(v: Set<string>) {
       harnessState.unauthenticatedModels = v
+    },
+    get mockStreamSimple() {
+      return harnessState.mockStreamSimple
+    },
+    set mockStreamSimple(v) {
+      harnessState.mockStreamSimple = v
     },
     registerExtraHandler(event, fn) {
       const list = handlers.get(event) ?? []

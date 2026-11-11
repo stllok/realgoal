@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent"
-import { Effect, Option } from "effect"
+import { Effect, Exit, Option } from "effect"
 import {
   InvalidTransitionError,
   OwnershipConflictError,
@@ -29,6 +29,7 @@ import {
 } from "../bridge/pi-wrapper.ts"
 import { ControllerService } from "../services/controller-service.ts"
 import { DoctorService } from "../services/doctor-service.ts"
+import { sanitizeTaskStem } from "../services/path-safety.ts"
 import { PersistenceService, type LoadedWorkItemResult } from "../services/persistence.ts"
 import { PreviewService } from "../services/preview-service.ts"
 import {
@@ -61,10 +62,125 @@ export interface RegisterCommandsOptions {
   readonly piExecutable?: string
 }
 
-const deriveShortDisplayName = (objective: string, kind: WorkflowKind): string => {
-  const firstLine = objective.split(/\r?\n/)[0]?.trim() ?? ""
+const TITLE_GENERATION_TIMEOUT_MS = 8_000
+const TITLE_GENERATION_MAX_OBJECTIVE_CHARS = 4_000
+const TITLE_SYSTEM_PROMPT =
+  "Generate a concise, specific 3 to 6 word title summarizing the user's software task objective. Output ONLY the plain title text on a single line with no quotes, markdown, prefixes, or trailing punctuation."
+
+export const cleanGeneratedTitle = (raw: string, maxLen = 56): Option.Option<string> => {
+  const firstNonEmpty =
+    raw
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line.length > 0) ?? ""
+  if (firstNonEmpty.length === 0) return Option.none()
+
+  const stripped = firstNonEmpty
+    .replace(/^#+\s*/, "")
+    .replace(/^(?:(?:goal|plan|task)\s+title|title)\s*:\s*/i, "")
+    .replace(/^["'`“”‘’*_\s]+/, "")
+    .replace(/["'`“”‘’*_.;:,!?\s]+$/, "")
+    .replace(/^[./\\-]+/, "")
+    .replace(/\s+/g, " ")
+    .trim()
+  if (stripped.length === 0) return Option.none()
+
+  const truncated =
+    stripped.length <= maxLen
+      ? stripped
+      : (() => {
+          const slice = stripped.slice(0, maxLen)
+          const lastSpace = slice.lastIndexOf(" ")
+          return (lastSpace >= 20 ? slice.slice(0, lastSpace) : slice).replace(/[-.,;:!?\s]+$/, "")
+        })()
+  if (truncated.length === 0) return Option.none()
+
+  return Exit.isSuccess(Effect.runSyncExit(sanitizeTaskStem(truncated)))
+    ? Option.some(truncated)
+    : Option.none()
+}
+
+export const deriveShortDisplayName = (objective: string, kind: WorkflowKind): string => {
+  const firstLine = (objective.split(/\r?\n/).find((line) => line.trim().length > 0) ?? "")
+    .trim()
+    .replace(/^[./\\-]+/, "")
+    .replace(/\s+/g, " ")
   if (firstLine.length === 0) return `${kind}-task`
-  return firstLine.length <= 48 ? firstLine : `${firstLine.slice(0, 48).trimEnd()}`
+  const candidate = firstLine.length <= 48 ? firstLine : firstLine.slice(0, 48).trimEnd()
+  return Exit.isSuccess(Effect.runSyncExit(sanitizeTaskStem(candidate))) ? candidate : `${kind}-task`
+}
+
+const generateWorkflowDisplayName = (
+  objective: string,
+  kind: WorkflowKind,
+  ctx: ExtensionCommandContext,
+): Effect.Effect<string, never> => {
+  const fallback = deriveShortDisplayName(objective, kind)
+  const model = ctx.model
+  if (!model || typeof ctx.modelRegistry?.streamSimple !== "function") {
+    return Effect.succeed(fallback)
+  }
+
+  const requiresReasoning = Boolean(model.reasoning && model.thinkingLevelMap?.off === null)
+  const setGeneratingStatus = Effect.sync(() => {
+    if (!ctx.hasUI) return
+    const label = `Generating ${kind} title…`
+    const styled = typeof ctx.ui.theme?.fg === "function" ? ctx.ui.theme.fg("muted", label) : label
+    ctx.ui.setStatus("realgoal", styled)
+  })
+  const clearGeneratingStatus = Effect.sync(() => {
+    if (!ctx.hasUI) return
+    ctx.ui.setStatus("realgoal", undefined)
+  })
+
+  return setGeneratingStatus.pipe(
+    Effect.flatMap(() =>
+      Effect.tryPromise({
+        try: async (fiberSignal) => {
+          const signals: AbortSignal[] = [fiberSignal, AbortSignal.timeout(TITLE_GENERATION_TIMEOUT_MS)]
+          if (ctx.signal && !ctx.signal.aborted) signals.push(ctx.signal)
+          const stream = ctx.modelRegistry.streamSimple(
+            model,
+            {
+              systemPrompt: TITLE_SYSTEM_PROMPT,
+              messages: [
+                {
+                  role: "user",
+                  content: [
+                    { type: "text", text: objective.slice(0, TITLE_GENERATION_MAX_OBJECTIVE_CHARS) },
+                  ],
+                  timestamp: Date.now(),
+                },
+              ],
+            },
+            {
+              ...(requiresReasoning
+                ? { reasoning: "minimal", thinkingBudgets: { minimal: 128 }, maxTokens: 320 }
+                : { maxTokens: 64 }),
+              maxRetries: 0,
+              timeoutMs: TITLE_GENERATION_TIMEOUT_MS,
+              cacheRetention: "none",
+              signal: AbortSignal.any(signals),
+            },
+          )
+          return await stream.result()
+        },
+        catch: () => undefined,
+      }),
+    ),
+    Effect.orElseSucceed(() => undefined),
+    Effect.ensuring(clearGeneratingStatus),
+    Effect.map((response) => {
+      if (!response || response.stopReason === "error" || response.stopReason === "aborted") {
+        return fallback
+      }
+      const text = response.content
+        .filter((block): block is { type: "text"; text: string } => block.type === "text")
+        .map((block) => block.text)
+        .join("\n")
+      return Option.getOrElse(cleanGeneratedTitle(text), () => fallback)
+    }),
+  )
 }
 
 const emitNoticeMessage = (pi: ExtensionAPI, text: string): Effect.Effect<void, never> =>
@@ -242,31 +358,32 @@ export const registerRealgoalCommands = (
                         missingConditions: [`Provide objective text: /${kind} <objective>`],
                       }),
                     ),
-              onSome: (objective) => {
-                const nowIso = new Date().toISOString()
-                const displayName = deriveShortDisplayName(objective, kind)
-                return controller
-                  .startNewWorkItem({
-                    kind,
-                    displayName,
-                    objective,
-                    nowIso,
-                  })
-                  .pipe(
-                    Effect.tap(({ state, paths }) =>
-                      triggerWorkflowKickoff(
-                        pi,
-                        ctx,
-                        kind === "goal"
-                          ? `[Realgoal /goal started · id=${state.id} · draft=${paths.draftDir}]\nObjective: ${objective}\nAdvance intake -> explore|analyze -> process -> verify via realgoal_control, track/verify T001 via realgoal_todo, and finish via realgoal_finish(recordGoalLevelVerification: true).`
-                          : `[Realgoal /plan started · id=${state.id} · draft=${paths.draftDir}]\nObjective: ${objective}\nPlanning boundary is active: advance intake -> discovery|design|analysis -> finalization via realgoal_control, clarify ambiguities with realgoal_question / realgoal_preview, write ${paths.finalizedPath} and call realgoal_control(action: "finalize"), and do NOT modify repository files outside ${paths.draftDir} until user authorizes execution.`,
+              onSome: (objective) =>
+                generateWorkflowDisplayName(objective, kind, ctx).pipe(
+                  Effect.flatMap((displayName) =>
+                    controller
+                      .startNewWorkItem({
+                        kind,
+                        displayName,
+                        objective,
+                        nowIso: new Date().toISOString(),
+                      })
+                      .pipe(
+                        Effect.tap(({ state, paths }) =>
+                          triggerWorkflowKickoff(
+                            pi,
+                            ctx,
+                            kind === "goal"
+                              ? `[Realgoal /goal started · id=${state.id} · draft=${paths.draftDir}]\nObjective: ${objective}\nAdvance intake -> explore|analyze -> process -> verify via realgoal_control, track/verify T001 via realgoal_todo, and finish via realgoal_finish(recordGoalLevelVerification: true).`
+                              : `[Realgoal /plan started · id=${state.id} · draft=${paths.draftDir}]\nObjective: ${objective}\nPlanning boundary is active: advance intake -> discovery|design|analysis -> finalization via realgoal_control, clarify ambiguities with realgoal_question / realgoal_preview, write ${paths.finalizedPath} and call realgoal_control(action: "finalize"), and do NOT modify repository files outside ${paths.draftDir} until user authorizes execution.`,
+                          ),
+                        ),
+                        Effect.map(({ state }) =>
+                          Option.some(`Started ${kind.toUpperCase()} "${state.displayName}" (${state.id}).`),
+                        ),
                       ),
-                    ),
-                    Effect.map(({ state }) =>
-                      Option.some(`Started ${kind.toUpperCase()} "${state.displayName}" (${state.id}).`),
-                    ),
-                  )
-              },
+                  ),
+                ),
             }),
           ),
         )
